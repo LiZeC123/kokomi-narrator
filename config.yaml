@@ -1,0 +1,17 @@
+database: ./data/tts.db
+audio_dir: ./data/audio
+output_dir: ./data/output
+log_level: info
+
+tts:
+  url: "http://192.168.1.217:5000/tts"
+  character: "Kokomi"
+  timeout: 60s
+  retries: 2
+  retry_backoff: 2s
+  headers: {}
+
+merge:
+  overwrite: true
+  gap_between_segments: 500ms
+  leading_trailing_gap: false
