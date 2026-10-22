@@ -1,19 +1,15 @@
 package cli
 
 import (
-	"errors"
-	"fmt"
-
 	"github.com/spf13/cobra"
 
-	"github.com/LiZeC123/kokomi-narrator/internal/store"
 	"github.com/LiZeC123/kokomi-narrator/internal/textparse"
 )
 
 func newUpdateCommand(configPath *string) *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "update <file>",
+		Use:   "update <file|id>",
 		Short: "Incrementally update a registered text file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -26,23 +22,19 @@ func newUpdateCommand(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func runUpdate(a *app, name string, force bool) error {
-	data, segments, err := readText(name)
+func runUpdate(a *app, fileArg string, force bool) error {
+	file, err := resolveFile(a, fileArg)
 	if err != nil {
 		return err
 	}
-
-	file, err := a.store.FileByName(name)
+	data, segments, err := readText(file.Filename)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%s is not registered (run add first)", name)
-		}
 		return err
 	}
 
 	contentHash := textparse.HashBytes(data)
 	if file.ContentHash == contentHash && !force {
-		a.printf("%s: content unchanged\n", name)
+		a.printf("%s: content unchanged\n", file.Filename)
 		return nil
 	}
 
@@ -51,6 +43,6 @@ func runUpdate(a *app, name string, force bool) error {
 		return err
 	}
 	a.printf("updated %s: %d segments (%d added, %d reused, %d deleted)\n",
-		name, len(segments), stats.Added, stats.Reused, stats.Deleted)
+		file.Filename, len(segments), stats.Added, stats.Reused, stats.Deleted)
 	return nil
 }

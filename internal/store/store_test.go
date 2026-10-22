@@ -147,3 +147,55 @@ func TestConnectionPragmas(t *testing.T) {
 		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
 	}
 }
+
+func TestFileByIDAndListFiles(t *testing.T) {
+	st := openTestStore(t)
+	now := "2026-01-03T00:00:00Z"
+
+	create := func(name, text string) *File {
+		t.Helper()
+		segments, err := textparse.Parse([]byte(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := &File{
+			Filename:    name,
+			VoiceKey:    "0123456789abcdef",
+			ContentHash: textparse.HashBytes([]byte(text)),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := st.CreateFile(f, segments); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	first := create("a.txt", "一\n二\n三\n")
+	second := create("b.txt", "四\n")
+
+	got, err := st.FileByID(second.ID)
+	if err != nil {
+		t.Fatalf("FileByID() error = %v", err)
+	}
+	if got.Filename != second.Filename || got.ID != second.ID {
+		t.Fatalf("FileByID() = %+v, want %+v", got, second)
+	}
+	if _, err := st.FileByID(9999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("FileByID(9999) error = %v, want ErrNotFound", err)
+	}
+
+	files, err := st.ListFiles()
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("ListFiles() returned %d files, want 2", len(files))
+	}
+	if files[0].ID != first.ID || files[0].Segments != 3 {
+		t.Fatalf("files[0] = %+v, want id=%d segments=3", files[0], first.ID)
+	}
+	if files[1].ID != second.ID || files[1].Segments != 1 {
+		t.Fatalf("files[1] = %+v, want id=%d segments=1", files[1], second.ID)
+	}
+}

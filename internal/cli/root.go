@@ -71,6 +71,9 @@ func newRootCommand() *cobra.Command {
 		newRedoCommand(&configPath),
 		newMergeCommand(&configPath),
 		newCleanCommand(&configPath),
+		newFilesCommand(&configPath),
+		newFindCommand(&configPath),
+		newPlayCommand(&configPath),
 		newExtractCommand(),
 	)
 	return root

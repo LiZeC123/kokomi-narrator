@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -18,7 +19,7 @@ import (
 
 func newMakeCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "make <file>",
+		Use:   "make <file|id>",
 		Short: "Synthesize all pending speech segments",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -90,17 +91,12 @@ func buildSync(audioDir, voiceKey string, segments []store.Segment) (syncStats, 
 	return stats, updates
 }
 
-func runMake(a *app, name string) error {
-	if err := validateFilename(name); err != nil {
-		return err
-	}
-	file, err := a.store.FileByName(name)
+func runMake(a *app, fileArg string) error {
+	file, err := resolveFile(a, fileArg)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%s is not registered (run add first)", name)
-		}
 		return err
 	}
+	name := file.Filename
 	segments, err := a.store.SegmentsByFile(file.ID)
 	if err != nil {
 		return err
@@ -152,83 +148,86 @@ func runMake(a *app, name string) error {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	var jobs []ttsJob
+	seen := make(map[string]bool, len(pending))
+	for _, seg := range pending {
+		if seen[seg.TextHash] {
+			continue
+		}
+		seen[seg.TextHash] = true
+		jobs = append(jobs, ttsJob{
+			Hash: seg.TextHash,
+			Text: seg.Text,
+			Seq:  seg.Seq,
+		})
+	}
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
 
 	prog := newProgress(a.errOut, len(pending))
 	defer prog.close()
 
 	client := tts.New(a.cfg.TTS)
-	processed := make(map[string]bool)
-	currentHash := ""
+	workerCount := a.cfg.TTS.Concurrency
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	if workerCount > len(jobs) {
+		workerCount = len(jobs)
+	}
 
-	for _, seg := range pending {
-		if ctx.Err() != nil {
-			return a.interruptMake(file.ID, currentHash, file.VoiceKey)
-		}
-		if processed[seg.TextHash] {
-			continue
-		}
-		processed[seg.TextHash] = true
-		currentHash = seg.TextHash
-		now := a.timestamp()
+	var (
+		fatalOnce sync.Once
+		fatalErr  error
+		wg        sync.WaitGroup
+	)
 
-		affected, err := a.store.SetHashStatus(file.ID, seg.TextHash, store.StatusProcessing, nil, true, now)
-		if err != nil {
-			return err
-		}
-		if affected == 0 {
-			currentHash = ""
-			continue
-		}
-		prog.starting(seg.TextHash)
-
-		data, ttsErr := client.Synthesize(ctx, seg.Text)
-		if ttsErr != nil {
-			if ctx.Err() != nil {
-				return a.interruptMake(file.ID, currentHash, file.VoiceKey)
+	jobsCh := make(chan ttsJob)
+	feedDone := make(chan struct{})
+	go func() {
+		defer close(feedDone)
+		defer close(jobsCh)
+		for _, job := range jobs {
+			select {
+			case jobsCh <- job:
+			case <-ctx.Done():
+				return
 			}
-			msg := tts.TruncateRunes(ttsErr.Error(), 500)
-			if _, err := a.store.SetHashStatus(file.ID, seg.TextHash, store.StatusFailed, &msg, false, now); err != nil {
-				return err
+		}
+	}()
+
+	wg.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			defer wg.Done()
+			for job := range jobsCh {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := a.runTTSJob(ctx, client, file, name, job, prog); err != nil {
+					fatalOnce.Do(func() {
+						fatalErr = err
+						cancel()
+					})
+					return
+				}
 			}
-			a.log.Error("segment synthesis failed",
-				"file", name,
-				"seq", seg.Seq,
-				"hash", shortHash(seg.TextHash),
-				"error", tts.TruncateRunes(msg, 200),
-			)
-			prog.complete(seg.TextHash, int(affected), true, msg)
-			currentHash = ""
-			continue
-		}
+		}()
+	}
+	wg.Wait()
+	<-feedDone
 
-		if ctx.Err() != nil {
-			return a.interruptMake(file.ID, currentHash, file.VoiceKey)
-		}
-
-		target := audioPath(a.cfg.AudioDir, file.VoiceKey, seg.TextHash)
-		if err := wavutil.WriteAtomic(target, data); err != nil {
-			msg := tts.TruncateRunes(err.Error(), 500)
-			if _, dbErr := a.store.SetHashStatus(file.ID, seg.TextHash, store.StatusFailed, &msg, false, now); dbErr != nil {
-				return dbErr
-			}
-			a.log.Error("audio write failed",
-				"file", name,
-				"seq", seg.Seq,
-				"hash", shortHash(seg.TextHash),
-				"error", tts.TruncateRunes(msg, 200),
-			)
-			prog.complete(seg.TextHash, int(affected), true, msg)
-			currentHash = ""
-			continue
-		}
-
-		if _, err := a.store.SetHashStatus(file.ID, seg.TextHash, store.StatusSuccess, nil, false, now); err != nil {
-			return err
-		}
-		prog.complete(seg.TextHash, int(affected), false, "")
-		currentHash = ""
+	if sigCtx.Err() != nil {
+		a.cleanupAfterAbort(file.ID, file.VoiceKey, jobs)
+		a.errorf("interrupted\n")
+		return exitSilent(130)
+	}
+	if fatalErr != nil {
+		a.cleanupAfterAbort(file.ID, file.VoiceKey, jobs)
+		return fatalErr
 	}
 
 	finalSegments, err := a.store.SegmentsByFile(file.ID)
@@ -259,14 +258,82 @@ func runMake(a *app, name string) error {
 	return nil
 }
 
-func (a *app) interruptMake(fileID int64, hash, voiceKey string) error {
+type ttsJob struct {
+	Hash string
+	Text string
+	Seq  int
+}
+
+func (a *app) runTTSJob(ctx context.Context, client *tts.Client, file *store.File, name string, job ttsJob, prog *progress) error {
 	now := a.timestamp()
-	if hash != "" {
-		_, _ = a.store.SetHashStatus(fileID, hash, store.StatusPending, nil, false, now)
-		_ = os.Remove(audioPath(a.cfg.AudioDir, voiceKey, hash) + ".tmp")
-	} else {
-		_, _ = a.store.RecoverProcessing(fileID, "", now)
+	affected, err := a.store.SetHashStatus(file.ID, job.Hash, store.StatusProcessing, nil, true, now)
+	if err != nil {
+		return err
 	}
-	a.errorf("interrupted\n")
-	return exitSilent(130)
+	if affected == 0 {
+		return nil
+	}
+	prog.starting(job.Hash)
+
+	data, ttsErr := client.Synthesize(ctx, job.Text)
+	if ttsErr != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		msg := tts.TruncateRunes(ttsErr.Error(), 500)
+		if _, err := a.store.SetHashStatus(file.ID, job.Hash, store.StatusFailed, &msg, false, now); err != nil {
+			return err
+		}
+		a.log.Error("segment synthesis failed",
+			"file", name,
+			"seq", job.Seq,
+			"hash", shortHash(job.Hash),
+			"error", tts.TruncateRunes(msg, 200),
+		)
+		prog.complete(job.Hash, int(affected), true, msg)
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	target := audioPath(a.cfg.AudioDir, file.VoiceKey, job.Hash)
+	if err := wavutil.WriteAtomic(target, data); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		msg := tts.TruncateRunes(err.Error(), 500)
+		if _, dbErr := a.store.SetHashStatus(file.ID, job.Hash, store.StatusFailed, &msg, false, now); dbErr != nil {
+			return dbErr
+		}
+		a.log.Error("audio write failed",
+			"file", name,
+			"seq", job.Seq,
+			"hash", shortHash(job.Hash),
+			"error", tts.TruncateRunes(msg, 200),
+		)
+		prog.complete(job.Hash, int(affected), true, msg)
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+	if _, err := a.store.SetHashStatus(file.ID, job.Hash, store.StatusSuccess, nil, false, now); err != nil {
+		return err
+	}
+	prog.complete(job.Hash, int(affected), false, "")
+	return nil
+}
+
+// cleanupAfterAbort returns in-flight segments to pending and removes any
+// partially written temp files. Successfully completed jobs stay untouched.
+func (a *app) cleanupAfterAbort(fileID int64, voiceKey string, jobs []ttsJob) {
+	if _, err := a.store.RecoverProcessing(fileID, "", a.timestamp()); err != nil {
+		a.log.Error("recover processing segments failed", "error", err)
+	}
+	for _, job := range jobs {
+		_ = os.Remove(audioPath(a.cfg.AudioDir, voiceKey, job.Hash) + ".tmp")
+	}
 }

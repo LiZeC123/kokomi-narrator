@@ -46,6 +46,7 @@ type Config struct {
 type TTS struct {
 	URL          string            `yaml:"url"`
 	Character    string            `yaml:"character"`
+	Concurrency  int               `yaml:"concurrency"`
 	Timeout      Duration          `yaml:"timeout"`
 	Retries      int               `yaml:"retries"`
 	RetryBackoff Duration          `yaml:"retry_backoff"`
@@ -67,6 +68,7 @@ func Default() *Config {
 		TTS: TTS{
 			URL:          "http://127.0.0.1:8080/tts",
 			Character:    "default",
+			Concurrency:  2,
 			Timeout:      Duration(60 * time.Second),
 			Retries:      2,
 			RetryBackoff: Duration(2 * time.Second),
@@ -113,6 +115,9 @@ func (c *Config) validate() error {
 	}
 	if c.TTS.Timeout.Std() <= 0 {
 		return fmt.Errorf("tts.timeout must be greater than zero")
+	}
+	if c.TTS.Concurrency < 1 {
+		return fmt.Errorf("tts.concurrency must be at least 1")
 	}
 	if c.TTS.Retries < 0 {
 		return fmt.Errorf("tts.retries must not be negative")

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,14 +11,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/LiZeC123/kokomi-narrator/internal/store"
 	"github.com/LiZeC123/kokomi-narrator/internal/textparse"
 	"github.com/LiZeC123/kokomi-narrator/internal/wavutil"
 )
 
 func newMergeCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "merge <file>",
+		Use:   "merge <file|id>",
 		Short: "Merge all speech audio of a text file into one WAV",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -30,17 +28,12 @@ func newMergeCommand(configPath *string) *cobra.Command {
 	}
 }
 
-func runMerge(a *app, name string) error {
-	if err := validateFilename(name); err != nil {
-		return err
-	}
-	file, err := a.store.FileByName(name)
+func runMerge(a *app, fileArg string) error {
+	file, err := resolveFile(a, fileArg)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%s is not registered (run add first)", name)
-		}
 		return err
 	}
+	name := file.Filename
 
 	base := strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename))
 	outputPath := filepath.Join(a.cfg.OutputDir, base+".wav")

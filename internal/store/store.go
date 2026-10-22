@@ -33,6 +33,11 @@ type File struct {
 	UpdatedAt   string
 }
 
+type FileSummary struct {
+	File
+	Segments int
+}
+
 type Segment struct {
 	ID        int64
 	FileID    int64
@@ -168,6 +173,47 @@ func (s *Store) FileByName(name string) (*File, error) {
 		return nil, err
 	}
 	return &f, nil
+}
+
+func (s *Store) FileByID(id int64) (*File, error) {
+	row := s.db.QueryRow(
+		`SELECT id, filename, voice_key, content_hash, created_at, updated_at
+		 FROM files WHERE id = ?`, id)
+
+	var f File
+	if err := row.Scan(&f.ID, &f.Filename, &f.VoiceKey, &f.ContentHash, &f.CreatedAt, &f.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: id %d", ErrNotFound, id)
+		}
+		return nil, err
+	}
+	return &f, nil
+}
+
+// ListFiles returns all registered files ordered by ID.
+func (s *Store) ListFiles() ([]FileSummary, error) {
+	rows, err := s.db.Query(
+		`SELECT f.id, f.filename, f.voice_key, f.content_hash, f.created_at, f.updated_at,
+		        COUNT(s.id)
+		 FROM files f
+		 LEFT JOIN segments s ON s.file_id = f.id
+		 GROUP BY f.id
+		 ORDER BY f.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []FileSummary
+	for rows.Next() {
+		var f FileSummary
+		if err := rows.Scan(&f.ID, &f.Filename, &f.VoiceKey, &f.ContentHash,
+			&f.CreatedAt, &f.UpdatedAt, &f.Segments); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
 }
 
 func (s *Store) SegmentsByFile(fileID int64) ([]Segment, error) {

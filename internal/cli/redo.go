@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -17,51 +16,44 @@ import (
 )
 
 func newRedoCommand(configPath *string) *cobra.Command {
-	return &cobra.Command{
-		Use:   "redo <file> <seq>",
+	var play bool
+	cmd := &cobra.Command{
+		Use:   "redo <file|id> <seq>",
 		Short: "Regenerate the audio for one speech segment",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withApp(cmd, *configPath, func(a *app) error {
-				return runRedo(a, args[0], args[1])
+				return runRedo(a, args[0], args[1], play)
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&play, "play", false, "play the audio after redo")
+	return cmd
 }
 
-func runRedo(a *app, name, seqArg string) error {
-	if err := validateFilename(name); err != nil {
+func runRedo(a *app, fileArg, seqArg string, play bool) error {
+	file, err := resolveFile(a, fileArg)
+	if err != nil {
 		return err
 	}
-	seq, err := strconv.Atoi(seqArg)
+	seq, err := parseSeq(seqArg)
 	if err != nil {
-		return fmt.Errorf("invalid seq %q: %w", seqArg, err)
-	}
-	if seq <= 0 {
-		return fmt.Errorf("seq must be greater than zero")
-	}
-
-	file, err := a.store.FileByName(name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%s is not registered (run add first)", name)
-		}
 		return err
 	}
 	segment, err := a.store.SegmentBySeq(file.ID, seq)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%s has no segment with seq %d", name, seq)
+			return fmt.Errorf("%s has no segment with seq %d", file.Filename, seq)
 		}
 		return err
 	}
 	if segment.Kind != textparse.KindSpeech {
-		return fmt.Errorf("%s seq %d is a punctuation segment", name, seq)
+		return fmt.Errorf("%s seq %d is a punctuation segment", file.Filename, seq)
 	}
 
 	currentVoice := currentVoiceKey(a.cfg)
 	if file.VoiceKey != currentVoice {
-		return fmt.Errorf("voice changed (%s -> %s); run make %s first", file.VoiceKey, currentVoice, name)
+		return fmt.Errorf("voice changed (%s -> %s); run make %s first", file.VoiceKey, currentVoice, file.Filename)
 	}
 
 	target := audioPath(a.cfg.AudioDir, file.VoiceKey, segment.TextHash)
@@ -76,7 +68,11 @@ func runRedo(a *app, name, seqArg string) error {
 		if err != nil {
 			return err
 		}
-		a.printf("redo %s seq %d: success (%d segment(s))\n", name, seq, n)
+		segment.Status = store.StatusSuccess
+		a.printf("redo %s seq %d: success (%d segment(s))\n", file.Filename, seq, n)
+		if play {
+			playAfterRedo(a, file, segment)
+		}
 		return nil
 	}
 
@@ -86,13 +82,28 @@ func runRedo(a *app, name, seqArg string) error {
 		if _, err := a.store.SetHashStatus(file.ID, segment.TextHash, store.StatusSuccess, nil, false, a.timestamp()); err != nil {
 			return err
 		}
-		a.errorf("redo %s seq %d failed: %s (existing audio kept)\n", name, seq, displayMsg)
+		segment.Status = store.StatusSuccess
+		a.errorf("redo %s seq %d failed: %s (existing audio kept)\n", file.Filename, seq, displayMsg)
+		if play {
+			playAfterRedo(a, file, segment)
+		}
 		return exitSilent(2)
 	}
 
 	if _, err := a.store.SetHashStatus(file.ID, segment.TextHash, store.StatusFailed, &msg, false, a.timestamp()); err != nil {
 		return err
 	}
-	a.errorf("redo %s seq %d failed: %s\n", name, seq, displayMsg)
+	a.errorf("redo %s seq %d failed: %s\n", file.Filename, seq, displayMsg)
 	return exitSilent(2)
+}
+
+// playAfterRedo plays the resulting audio without changing redo's exit status.
+func playAfterRedo(a *app, file *store.File, segment *store.Segment) {
+	if err := playSegment(a, file, segment); err != nil {
+		if errors.Is(err, errPlaybackInterrupted) {
+			a.errorf("playback interrupted\n")
+			return
+		}
+		a.errorf("warning: playback failed: %v\n", err)
+	}
 }

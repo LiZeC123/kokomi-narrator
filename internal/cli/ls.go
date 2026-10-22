@@ -1,20 +1,15 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
-
-	"github.com/LiZeC123/kokomi-narrator/internal/store"
-	"github.com/LiZeC123/kokomi-narrator/internal/tts"
 )
 
 func newLsCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "ls <file> [offset] [limit]",
+		Use:   "ls <file|id> [offset] [limit]",
 		Short: "List segments of a text file",
 		Args:  cobra.RangeArgs(1, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -26,12 +21,11 @@ func newLsCommand(configPath *string) *cobra.Command {
 }
 
 func runLs(a *app, args []string) error {
-	name := args[0]
-	if err := validateFilename(name); err != nil {
+	file, err := resolveFile(a, args[0])
+	if err != nil {
 		return err
 	}
 	offset, limit := 0, 0
-	var err error
 	if len(args) > 1 {
 		offset, err = strconv.Atoi(args[1])
 		if err != nil {
@@ -51,13 +45,6 @@ func runLs(a *app, args []string) error {
 		return fmt.Errorf("limit must not be negative")
 	}
 
-	file, err := a.store.FileByName(name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%s is not registered (run add first)", name)
-		}
-		return err
-	}
 	segments, err := a.store.SegmentsByFile(file.ID)
 	if err != nil {
 		return err
@@ -80,15 +67,6 @@ func runLs(a *app, args []string) error {
 		a.printf("showing %d-%d of %d\n", offset, offset+len(page)-1, total)
 	}
 	a.printf("\n")
-	a.printf("%-5s%-11s%-12s%-10s%s\n", "SEQ", "STATUS", "KIND", "HASH", "TEXT")
-
-	for _, seg := range page {
-		text := tts.TruncateRunes(seg.Text, 30)
-		if seg.Status == store.StatusFailed && seg.Error != nil {
-			msg := tts.TruncateRunes(strings.Join(strings.Fields(*seg.Error), " "), 50)
-			text += fmt.Sprintf("  [error: %s]", msg)
-		}
-		a.printf("%-5d%-11s%-12s%-10s%s\n", seg.Seq, seg.Status, seg.Kind, shortHash(seg.TextHash), text)
-	}
+	printSegmentTable(a.out, page)
 	return nil
 }

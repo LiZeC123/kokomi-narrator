@@ -6,6 +6,7 @@ log_level: info
 tts:
   url: "http://192.168.1.217:5000/tts"
   character: "Kokomi"
+  concurrency: 2
   timeout: 60s
   retries: 2
   retry_backoff: 2s

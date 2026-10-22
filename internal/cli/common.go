@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/LiZeC123/kokomi-narrator/internal/config"
+	"github.com/LiZeC123/kokomi-narrator/internal/store"
 	"github.com/LiZeC123/kokomi-narrator/internal/textparse"
 )
 
@@ -54,6 +57,39 @@ func ensureRegularFile(name string) error {
 	return nil
 }
 
+// resolveFile accepts either a numeric file ID or a registered .txt filename.
+func resolveFile(a *app, arg string) (*store.File, error) {
+	if arg == "" {
+		return nil, fmt.Errorf("file ID or filename must not be empty")
+	}
+
+	if id, err := strconv.ParseInt(arg, 10, 64); err == nil {
+		if id <= 0 {
+			return nil, fmt.Errorf("invalid file ID %d", id)
+		}
+		file, err := a.store.FileByID(id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, fmt.Errorf("file ID %d not found (run `ttsctl files`)", id)
+			}
+			return nil, err
+		}
+		return file, nil
+	}
+
+	if err := validateFilename(arg); err != nil {
+		return nil, err
+	}
+	file, err := a.store.FileByName(arg)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("%s is not registered (run add first)", arg)
+		}
+		return nil, err
+	}
+	return file, nil
+}
+
 func readText(name string) ([]byte, []textparse.Segment, error) {
 	if err := validateFilename(name); err != nil {
 		return nil, nil, err
@@ -78,6 +114,17 @@ func audioPath(audioDir, voiceKey, textHash string) string {
 
 func currentVoiceKey(cfg *config.Config) string {
 	return config.VoiceKey(cfg.TTS.Character)
+}
+
+func parseSeq(arg string) (int, error) {
+	seq, err := strconv.Atoi(arg)
+	if err != nil {
+		return 0, fmt.Errorf("invalid seq %q: %w", arg, err)
+	}
+	if seq <= 0 {
+		return 0, fmt.Errorf("seq must be greater than zero")
+	}
+	return seq, nil
 }
 
 func shortHash(hash string) string {

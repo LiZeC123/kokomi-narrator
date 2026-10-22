@@ -72,7 +72,7 @@ func runAdd(a *app, name string) error {
 		reused += int(n)
 	}
 
-	a.printf("added %s: %d segments (%d speech, %d punctuation skipped, %d audio reused)\n",
-		name, len(segments), speech, punctuation, reused)
+	a.printf("added %s: %d segments (%d speech, %d punctuation skipped, %d audio reused) (id=%d)\n",
+		name, len(segments), speech, punctuation, reused, file.ID)
 	return nil
 }

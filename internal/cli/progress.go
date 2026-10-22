@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/schollz/progressbar/v3"
@@ -13,6 +14,7 @@ import (
 )
 
 type progress struct {
+	mu       sync.Mutex
 	w        io.Writer
 	total    int
 	done     int
@@ -42,6 +44,8 @@ func newProgress(w io.Writer, total int) *progress {
 }
 
 func (p *progress) starting(hash string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.bar == nil {
 		return
 	}
@@ -52,6 +56,8 @@ func (p *progress) complete(hash string, segments int, failed bool, detail strin
 	if segments <= 0 {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.done += segments
 	if failed {
 		p.failed += segments
@@ -76,6 +82,8 @@ func (p *progress) complete(hash string, segments int, failed bool, detail strin
 }
 
 func (p *progress) close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.bar != nil {
 		_ = p.bar.Exit()
 		fmt.Fprintln(p.w)
