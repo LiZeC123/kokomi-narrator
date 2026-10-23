@@ -1,104 +1,32 @@
 # Kokomi Narrator
 
-把长篇文本变成有声书的个人 TTS 工作流工具。
+Kokomi Narrator 是一个面向个人使用的长文本 TTS 工作流工具。`ttsctl` 把文本切成片段、调用 TTS 服务、管理合成状态，并把片段加工成有声书音频或视频。
 
-`ttsctl` 负责把文本切成片段、调用 TTS 服务、管理每段的合成状态，并在需要时试听、重做、合并人声、合成 BGM 和混音。它不内置 TTS 引擎，而是连接一个返回 WAV 音频的 HTTP 服务。
+它不内置 TTS 引擎，需要连接外部 HTTP 服务。实现细节见 [dev.md](dev.md)。
 
----
+## 功能
 
-## 为什么做这个
+- 按行导入 `.txt`，纯标点行自动跳过
+- 修改文本后只重新处理变化的片段
+- 支持并发合成、失败重试、断点续跑
+- 按文件查看片段状态、搜索文本、试听和重做
+- 检查异常长静音，并批量重做问题片段
+- 合并人声，随机生成 BGM，混音为最终 WAV
+- 将最终音频和封面图合成为 MP4
+- 从 EPUB 提取章节文本
+- 删除已导入项目并清理无引用音频
+- 使用数字文件 ID 代替长文件名
 
-长篇文本的语音合成通常不是一次完成的：文本会反复修改，个别片段可能需要重做，服务也可能失败或中断。如果每次全文重新合成，既慢又浪费。
-
-Kokomi Narrator 把“文本文件”拆成“语音片段”来管理：
-
-- 已经合成过的片段不会重复请求
-- 修改文本后只处理真正变化的片段
-- 失败的片段可以单独重试
-- 听感不对的片段可以直接定位、重做并复听
-- 最终把全部片段合并成人声，并可选合成 BGM、混音为最终 WAV
-
-它面向个人使用，不是多用户在线服务，也不需要额外的数据库服务。
-
----
-
-## 主要功能
-
-- **文本导入与分段**：按行解析 `.txt`，自动区分可朗读内容和纯标点
-- **增量更新**：修改文本后尽量保留未变化片段的状态和音频
-- **内容寻址缓存**：相同音色、相同文本的所有片段共享同一份音频
-- **并发合成**：默认同时向 TTS 服务发送 2 个请求，可配置
-- **失败重试**：支持超时、重试和退避；单个片段失败不影响其他片段
-- **断点续跑**：中断或进程异常退出后，下次执行 `make` 会继续处理未完成片段
-- **状态查看**：按文件列出片段、状态、错误和文本
-- **文本搜索**：按关键字找到对应的片段序号（seq）
-- **音频质量检查**：检测已生成片段中的异常长静音，按文件 ID 和 seq 列出问题；结果缓存到当前目录，`--redo` 复用缓存并一键重做
-- **试听与返修**：播放某一段音频；重做后自动播放新音频
-- **人声合并**：按顺序合并片段，并在片段之间插入可配置的静音，输出 `<文件名>_voice.wav`
-- **BGM 合成**：从配置的曲库随机选曲，按人声时长生成 `<文件名>_bgm.wav`，并输出记录曲目开始时间的 `<文件名>_bgm.txt`
-- **最终混音**：将人声与 BGM 按可配置音量混合为 `<文件名>.wav`，以较长输入为时长
-- **视频合成**：将最终音频和封面图合成为 `<文件名>.mp4`
-- **曲目缓存**：BGM 曲目时长写入 SQLite，只有新增或变化的文件才重新探测
-- **EPUB 导入**：从 EPUB 提取章节文本，保留目录结构
-- **项目删除**：从数据库删除已导入文件及其片段记录，之后可用 `clean` 清理对应音频
-- **音频清理**：删除没有任何数据库记录引用的音频文件
-- **文件 ID**：用短数字 ID 代替中文文件名，输入更省事
-
----
-
-## 工作原理
-
-整体流程很直接：
-
-```text
-TXT / EPUB
-   │
-   ▼
-按行切分片段
-   │
-   ▼
-SQLite 记录文件与片段状态
-   │
-   ▼  只选择待处理片段
-TTS HTTP 服务（可并发、可重试）
-   │
-   ▼
-校验后的 WAV 音频
-   │
-   ▼
-merge → output/<文件名>_voice.wav
-   │
-   ├── BGM 曲库 → bgm → output/<文件名>_bgm.wav + <文件名>_bgm.txt
-   │
-   ▼
-mix → output/<文件名>.wav
-   │
-   └── video → output/<文件名>.mp4
-```
-
-几个关键设计：
-
-- **音频内容寻址**：音频路径由“音色标识 + 文本 SHA-256”推导，不把路径存进数据库，因此相同文本可以跨文件复用。
-- **片段状态机**：每个片段有 `pending / processing / success / failed / skipped` 状态。`make` 启动时会先根据实际音频文件修正数据库状态。
-- **原子写入**：音频先写临时文件，校验通过后再替换目标文件，避免留下半截 WAV。
-- **增量更新**：文本变化时按内容哈希匹配旧片段，尽量保留原状态，只调整片段顺序。
-- **安全中断**：中断时把正在处理的片段恢复为 `pending`，下次继续。
-- **质量检查**：`check` 用 `ffmpeg silencedetect` 扫描片段 WAV，按 `file ID + seq` 列出异常长静音，并把结果保存为当前目录的 `check_results.txt`；`--redo` 优先读取该文件，跳过昂贵的全量检测，逐个重做并复检。
-- **BGM 曲目缓存**：曲目时长按 `size + mtime` 缓存，未变化的曲目不再调用 `ffprobe`。
-
----
-
-## 快速开始
-
-### 环境要求
+## 环境要求
 
 - Go 1.25.1 或更高版本
-- 一个可用的 TTS HTTP 服务，返回 PCM WAV
-- `bgm` 需要 `ffmpeg` 和 `ffprobe` 在 PATH 中
-- `mix` 需要 `ffmpeg` 在 PATH 中
-- `check` 需要 `ffmpeg` 在 PATH 中
-- `video` 需要 `audio2video` 在 PATH 中
-- 试听功能需要系统播放器；macOS 自带 `afplay`，Linux 可使用 `ffplay` 或 `mpv`
+- 一个兼容的 TTS HTTP 服务，返回 PCM WAV；接口约定见 [dev.md](dev.md) 的“TTS 客户端”一节
+- `bgm`：`ffmpeg`、`ffprobe`
+- `mix`、`check`：`ffmpeg`
+- `video`：`audio2video`
+- 试听：系统播放器；支持 `afplay`、`ffplay`、`mpv`
+
+## 安装与配置
 
 ### 构建
 
@@ -109,127 +37,75 @@ go build -o ttsctl .
 
 ### 配置
 
-默认读取当前目录的 `config.yaml`，也可以通过 `--config` 指定其他路径。
+默认读取当前目录的 `config.yaml`，也可以用 `--config` 指定其他路径。配置项及当前取值示例见 [config.yaml](config.yaml)。
 
-```yaml
-database: ./data/tts.db
-audio_dir: ./data/audio
-output_dir: ./data/output
-log_level: info
-
-tts:
-  url: "http://127.0.0.1:8080/tts"
-  character: "Kokomi"
-  concurrency: 2
-  timeout: 60s
-  retries: 2
-  retry_backoff: 2s
-  headers: {}
-
-merge:
-  overwrite: true
-  gap_between_segments: 200ms
-  leading_trailing_gap: false
-
-bgm:
-  dir: ./data/bgm        # 支持 ~/... 和绝对路径
-
-mix:
-  bgm_volume: 0.10
-
-video:
-  image: ./data/image.jpg
-
-check:
-  silence_db: -45
-  silence_duration: 1s
-  concurrency: 4
-```
-
-常用配置说明：
-
-- `tts.character`：音色标识，修改后 `make` 会重新合成
-- `tts.concurrency`：同时请求 TTS 的数量，默认 2
-- `tts.headers`：需要认证时附加的请求头
-- `merge.gap_between_segments`：片段之间的静音长度
-- `merge.leading_trailing_gap`：是否在整段音频首尾也插入静音
-- `bgm.dir`：BGM 曲库目录，支持 `~/...`、绝对路径和项目外目录，`bgm` 会扫描该目录下的常见音频格式
-- `mix.bgm_volume`：混音时 BGM 的音量，范围 `0.0 ~ 1.0`，默认 `0.10` 即 10%
-- `video.image`：视频封面图，支持 `~/...` 和绝对路径；可用 `video --image` 覆盖
-- `check.silence_db`：静音检测阈值，默认 `-45` dB
-- `check.silence_duration`：最短异常静音时长，默认 `1s`
-- `check.concurrency`：并发检测的 ffmpeg 进程数，默认 `4`
-
-> 输出命名：`merge` 生成 `<文件名>_voice.wav`，`bgm` 生成 `<文件名>_bgm.wav` 和曲目清单 `<文件名>_bgm.txt`，`mix` 生成最终 `<文件名>.wav`，`video` 生成 `<文件名>.mp4`。从旧版本升级后需要重新执行一次 `merge`。
-
-### TTS 接口
-
-项目调用 `tts.url`，请求体为扁平 JSON，文本需要做 URI 编码：
-
-```http
-POST /tts
-Content-Type: application/json
-
-{
-  "character": "Kokomi",
-  "text": "%E4%BD%A0%E5%A5%BD"
-}
-```
-
-服务需要返回 HTTP 200 和合法的 PCM WAV。项目会校验 WAV 的 `fmt`、`data` 和 PCM 格式；不符合要求会重试并记录错误。
-
----
+配置分为 TTS、合并、BGM、混音、视频和静音检查几组。首次使用至少确认 TTS 地址与音色、音频与输出目录、BGM 曲库和封面图路径。
 
 ## 基本流程
 
 ```bash
-# 1. 导入当前目录下的文本
+# 1. 导入文本并查看文件 ID
 ./ttsctl add novel.txt
-
-# 2. 查看文件 ID
 ./ttsctl files
-# ID  SEGMENTS  FILE
-# 1   120       novel.txt
 
-# 3. 合成待处理片段
+# 2. 合成并查看片段
 ./ttsctl make 1
-
-# 4. 查看片段状态
 ./ttsctl ls 1
 
-# 5. 检查异常长静音，并可自动重做问题片段
-./ttsctl check
-./ttsctl check --redo
+# 3. 合并人声
+./ttsctl merge 1
 
-# 6. 按文字找到片段序号
+# 4. 生成 BGM、混音、合成视频
+./ttsctl bgm 1
+./ttsctl mix 1
+./ttsctl video 1
+```
+
+输出文件默认位于 `config.yaml` 的 `output_dir`：
+
+| 命令 | 输出 |
+| --- | --- |
+| `merge` | `<文件名>_voice.wav` |
+| `bgm` | `<文件名>_bgm.wav`、`<文件名>_bgm.txt` |
+| `mix` | `<文件名>.wav` |
+| `video` | `<文件名>.mp4` |
+
+重复执行会覆盖已有输出。
+
+## BGM 曲目清单
+
+`bgm` 会生成 `<文件名>_bgm.txt`，记录实际抽中的曲目及开始时间，便于按时间定位。曲库目录（配置中的 `bgm.dir`）只扫描顶层，支持 mp3、wav、flac、m4a、aac、ogg、opus：
+
+```text
+# start	file
+00:00:00.000	one.mp3
+00:03:21.500	two.flac
+```
+
+## 常用操作
+
+### 修改文本
+
+```bash
+./ttsctl update 1
+./ttsctl make 1
+```
+
+`update` 会尽量复用未变化片段的合成状态。内容未变化时默认跳过，可用 `update --force` 强制重新解析。
+
+### 定位、试听和重做
+
+```bash
 ./ttsctl find 1 "飞船"
-
-# 7. 试听，或重做（重做成功后会自动播放）
 ./ttsctl play 1 42
 ./ttsctl redo 1 42
-
-# 8. 合并人声
-./ttsctl merge 1
-# -> data/output/novel_voice.wav
-
-# 9. 根据人声时长生成 BGM
-./ttsctl bgm 1
-# -> data/output/novel_bgm.wav
-# -> data/output/novel_bgm.txt（曲目开始时间清单）
-
-# 10. 混音为最终音频
-./ttsctl mix 1
-# -> data/output/novel.wav
-
-# 11. 合成为视频
-./ttsctl video 1
-# -> data/output/novel.mp4
-# 封面默认读取 video.image，可用 --image 覆盖
 ```
+
+`redo` 会重新合成指定片段，成功后自动播放。
 
 ### 检查异常音频
 
-TTS 服务偶尔会返回开头或中间带有异常长静音的 WAV。`check` 会用 `ffmpeg silencedetect` 扫描 `audio/` 下所有片段，并按 `file ID + seq` 列出问题：
+TTS 服务偶尔会返回带有异常长静音的 WAV。`check` 会扫描所有片段，并列出问题所在的文件 ID 和 seq：
 
 ```bash
 ./ttsctl check
@@ -245,106 +121,54 @@ check: 1 problematic wav(s), 1 segment(s) affected
 check: saved 1 problem(s) to check_results.txt
 ```
 
-`check` 还会把结果写入当前目录的 `check_results.txt`（每次执行都会覆盖旧缓存）。文件是普通文本，每行一个问题片段，可以直接编辑或删除某一行：
+检测结果会写入当前目录的 `check_results.txt`，每次执行覆盖。文件是普通文本，可以直接编辑或删除某一行：
 
 ```text
 # file_id	seq	text_hash	silences
 1	42	<64位text_hash>	3.03s-6.86s (3.84s); 10.00s-12.72s (2.72s)
 ```
 
-加上 `--redo` 时会优先读取 `check_results.txt`，跳过全量检测，自动重新合成缓存中的问题片段并立即复检：
+使用 `--redo` 会自动重做缓存中的问题片段：
 
 ```bash
 ./ttsctl check --redo
 ```
 
-- 缓存文件不存在时，`--redo` 会先执行一次全量检测。
-- 重做成功后会更新对应片段状态，并打印成功数量。
-- 重做失败或复检仍有静音的条目会逐条列出 `file id`、`seq`、文件名和原因，方便手动复核。
-- 全部修复时退出码为 0；仍有失败条目时退出码为 2。
-- 重做结束后会用未解决条目覆盖缓存；全部修复时缓存只保留表头。
-- 想强制重新检测时，删除 `check_results.txt` 后执行 `check` 或 `check --redo`。
-- 检测阈值来自 `check.silence_db` 和 `check.silence_duration`，不提供命令行覆盖。
+- 存在 `check_results.txt` 时跳过全量检测，直接按缓存重做；不存在时先执行一次检测。
+- 每个问题音频重做后立即复检；失败的条目跳过并继续处理后续条目。
+- 结束后输出修复数量，以及仍然失败的 `file id`、`seq`、文件名和原因。
+- 未解决的条目会写回缓存；全部修复时缓存只保留表头。
+- 无法解析的缓存行会被忽略；如果存在无法解析的行且没有任何有效行，`--redo` 会报错并提示删除或重新生成缓存。
+- 全部修复退出码 0；仍有失败条目退出码 2。
+- 删除 `check_results.txt` 可强制重新检测。
+- 只检测长静音，不检测一般性杂音；检测整段音频，刻意的长停顿也会被标记。阈值在 [config.yaml](config.yaml) 的 `check` 段调整。
 
-修改文本后：
-
-```bash
-./ttsctl update 1
-./ttsctl make 1
-```
-
-删除项目：
+### 删除项目
 
 ```bash
 ./ttsctl del 1
 ./ttsctl clean
 ```
 
-- `del` 只删除数据库中的文件记录和片段，不删除音频文件。
-- 之后执行 `clean` 清理不再被任何片段引用的音频。
+`del` 只删除数据库中的文件记录和片段，不删除音频文件，也不删除 `output/` 下的合并、BGM、混音或视频产物。之后执行 `clean` 清理不再被任何片段引用的音频。
 
-BGM 曲目清单：
-
-`bgm` 还会生成同名 `<文件名>_bgm.txt`，记录实际抽中的曲目及其在最终 BGM 中的开始时间，方便按时间定位：
-
-```text
-# start	file
-00:00:00.000	one.mp3
-00:03:21.500	two.flac
-```
-
-开始时间按合成计划计算：计入前面曲目的时长，以及大于 10ms 的曲间静音。
-
-从 EPUB 提取章节：
+### 从 EPUB 导入
 
 ```bash
 ./ttsctl extract book.epub
-# 默认输出到 plain_text/，保留 EPUB 内部目录结构
+./ttsctl extract book.epub plain_text/novel
+./ttsctl extract -o plain_text/novel book.epub
 ```
 
----
+默认输出到 `plain_text/`，保留 EPUB 内部目录结构。
 
-## 批量转换
-
-目录中准备好多个 `.txt` 文件时，可以使用 `batch.sh`：
-
-```bash
-./batch.sh /path/to/txt-dir
-./batch.sh -c /path/to/config.yaml /path/to/txt-dir
-./batch.sh --with-bgm -c /path/to/config.yaml /path/to/txt-dir
-```
-
-脚本会对每个文件依次执行：
-
-```text
-add（已存在则 update） → make → merge
-```
-
-加上 `--with-bgm` 后继续执行：
-
-```text
-bgm → mix
-```
-
-- 处理目录下所有 `.txt` 文件，不递归子目录
-- 默认只生成 `<文件名>_voice.wav`；`--with-bgm` 会继续生成 `_bgm.wav`、`_bgm.txt` 和最终 `<文件名>.wav`
-- 单个文件失败时跳过，继续处理下一个
-- 按 Ctrl-C 会终止整个批次，而不是继续下一个文件
-- 结束时输出成功/失败数量；存在失败文件时退出码为 1
-- 默认使用目标目录的 `config.yaml`，没有时回退到项目根目录的 `config.yaml`
-- `config.yaml` 中的相对路径相对于目标目录解析
-- 可以通过环境变量 `TTSCTL_BIN` 指定要调用的二进制
-- `--with-bgm` 需要配置有效的 `bgm.dir` 和 PATH 中的 `ffmpeg`/`ffprobe`
-
----
-
-## 命令一览
+## 命令参考
 
 | 命令 | 作用 |
 | --- | --- |
 | `add <file>` | 导入文本文件并创建片段 |
 | `del <file\|id>` | 删除已导入文件及其片段记录（音频留给 `clean` 清理） |
-| `update <file\|id>` | 文本变化后增量更新片段 |
+| `update <file\|id> [--force]` | 文本变化后增量更新片段 |
 | `make <file\|id>` | 合成所有待处理片段 |
 | `ls <file\|id> [offset] [limit]` | 查看片段状态和文本 |
 | `files` | 列出已注册文件和数字 ID |
@@ -353,64 +177,47 @@ bgm → mix
 | `redo <file\|id> <seq>` | 重做指定片段并自动播放 |
 | `check [--redo]` | 检查片段 WAV 的异常长静音并缓存结果，可选从缓存自动重做 |
 | `merge <file\|id>` | 合并全部语音片段为 `<文件名>_voice.wav` |
-| `bgm <file\|id>` | 生成与人声等长的 BGM，输出 `<文件名>_bgm.wav` 和曲目清单 `<文件名>_bgm.txt` |
+| `bgm <file\|id>` | 生成与人声等长的 BGM，输出 `<文件名>_bgm.wav` 和 `<文件名>_bgm.txt` |
 | `mix <file\|id>` | 混合人声与 BGM，输出最终 `<文件名>.wav` |
-| `video <file\|id> [--image PATH]` | 用最终音频和封面图生成 `<文件名>.mp4` |
+| `video <file\|id> [--image PATH]` | 用最终音频和封面图生成 `<文件名>.mp4`，封面支持 PNG/JPG/JPEG/BMP/GIF |
 | `clean [--dry-run]` | 清理未被数据库引用的音频 |
 | `extract <file.epub> [output_dir]` | 从 EPUB 提取章节文本 |
 
-除 `add` 外，所有按已注册文件操作的命令都支持 **文件 ID** 或原文件名。文件 ID 可以通过 `files` 查看，`add` 成功后也会输出新 ID。
+命令中标记为 `<file|id>` 的参数都支持文件 ID 或原文件名。文件 ID 可以通过 `files` 查看，`add` 成功后也会输出新 ID。
 
----
+## 批量转换
 
-## 数据目录
+目录中准备好多个 `.txt` 文件时，可以使用 [batch.sh](batch.sh)：
 
-默认情况下：
-
-```text
-data/
-├── tts.db          # 文件、片段状态和 BGM 曲目缓存
-├── audio/          # 按音色和文本哈希保存的 WAV
-├── bgm/            # BGM 曲库
-└── output/         # _voice.wav、_bgm.wav、_bgm.txt、最终 .wav 和 .mp4
+```bash
+./batch.sh /path/to/txt-dir
+./batch.sh -c /path/to/config.yaml /path/to/txt-dir
+./batch.sh --with-bgm -c /path/to/config.yaml /path/to/txt-dir
 ```
 
-`audio/` 下的文件不需要手动管理；`clean` 可以按数据库引用关系清理残留文件。`check` 只读取 `audio/` 下的片段 WAV，`check --redo` 会覆盖其中的异常片段；检测结果缓存写在当前工作目录的 `check_results.txt`。`output/` 下的文件由 `merge`、`bgm`、`mix`、`video` 生成，重复执行会覆盖。
+每个文件依次执行 `add`（已存在则 `update`）→ `make` → `merge`。加上 `--with-bgm` 后继续执行 `bgm` → `mix`。
 
----
+- 只处理目标目录顶层的 `.txt` 文件
+- 单个文件失败时跳过，继续处理下一个
+- 按 Ctrl-C 会终止整个批次
+- 结束后输出成功/失败数量；存在失败文件时退出码为 1
+- 默认使用目标目录的 `config.yaml`，没有时回退到项目根目录的 `config.yaml`
+- 配置中的相对路径相对于目标目录解析
+- 可用环境变量 `TTSCTL_BIN` 指定要调用的二进制
 
 ## 退出码
 
 | 退出码 | 含义 |
 | --- | --- |
 | `0` | 成功 |
-| `1` | 参数、配置、IO、数据库、播放器错误，或 `ffmpeg`/`ffprobe`/`audio2video` 缺失 |
-| `2` | 合成失败、重做失败、合并/BGM/混音/视频前置条件不满足或输出写入失败、`check` 发现异常/重做后仍有异常，或 `clean --dry-run` 有待删除项 |
+| `1` | 参数、配置、IO、数据库、播放器错误，或外部命令缺失 |
+| `2` | 合成/重做/前置条件/输出失败，`check` 发现问题，或 `clean --dry-run` 有待删除项 |
 | `130` | 用户中断 |
 
----
+## 限制
 
-## 适用场景与限制
-
-适合：
-
-- 把长篇小说、文章、剧本转成有声内容
-- 需要反复修改文本、分段重做和试听的个人工作流
-- 本地或局域网 TTS 服务
-
-限制：
-
-- 不内置 TTS 引擎，需要自备兼容的 HTTP 服务
-- 面向单用户 CLI，没有图形界面或在线服务
-- 播放依赖系统播放器，不支持内置的暂停、拖动等控制
-- 合并只支持 PCM WAV；不同片段格式不一致时会失败
-- `bgm` 需要 `ffmpeg`/`ffprobe`，生成的 BGM 固定为 48kHz 双声道 PCM WAV，长音频文件会比较大
-- `bgm` 只选择完整曲目；比目标时长长的曲目会被排除，剩余不足一首的时长用静音补齐
-- `mix` 需要 `ffmpeg`，BGM 音量由 `mix.bgm_volume` 控制
-- `mix` 以较长输入为时长；正常情况下 BGM 与人声等长，差异较大时会打印 warning
-- `check` 需要 `ffmpeg`，只检测长静音，不检测一般性杂音；检测整个文件，因此刻意的长停顿也会被标记，可通过 `check.silence_duration` 调整
-- `check` 只扫描 `audio_dir` 下的片段 WAV；`output_dir` 的合并/混音产物不在检查范围
-- `check --redo` 会信任当前目录的 `check_results.txt`；修改阈值或数据库后如果缓存过期，请删除该文件重新执行 `check`
-- `video` 需要 `audio2video` 在 PATH 中，并先通过 `mix` 生成最终音频
-- 视频封面支持 `audio2video` 能识别的格式（PNG/JPG/JPEG/BMP/GIF）
-- `add` 和 `update` 默认只处理当前目录下的纯文件名
+- 面向单用户 CLI，不提供图形界面或在线服务
+- 播放依赖系统播放器，不支持暂停、拖动等控制
+- 合并要求所有片段格式一致，且只支持 PCM WAV
+- BGM 只选择完整曲目，固定输出 48kHz 双声道 PCM，长音频文件会比较大
+- `add` 和 `update` 只处理当前目录下的纯 `.txt` 文件名
