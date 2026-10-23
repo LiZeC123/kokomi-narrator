@@ -9,6 +9,8 @@ const (
 	OutputSampleRate = 48000
 	// OutputChannels is the channel count used for generated BGM files.
 	OutputChannels = 2
+	// minAudibleGap is the smallest gap Render inserts between tracks.
+	minAudibleGap = 10 * time.Millisecond
 )
 
 // Track is one usable music library entry.

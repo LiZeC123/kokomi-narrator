@@ -35,11 +35,12 @@ Kokomi Narrator 把“文本文件”拆成“语音片段”来管理：
 - **音频质量检查**：检测已生成片段中的异常长静音，按文件 ID 和 seq 列出问题；结果缓存到当前目录，`--redo` 复用缓存并一键重做
 - **试听与返修**：播放某一段音频；重做后自动播放新音频
 - **人声合并**：按顺序合并片段，并在片段之间插入可配置的静音，输出 `<文件名>_voice.wav`
-- **BGM 合成**：从配置的曲库随机选曲，按人声时长生成 `<文件名>_bgm.wav`
+- **BGM 合成**：从配置的曲库随机选曲，按人声时长生成 `<文件名>_bgm.wav`，并输出记录曲目开始时间的 `<文件名>_bgm.txt`
 - **最终混音**：将人声与 BGM 按可配置音量混合为 `<文件名>.wav`，以较长输入为时长
 - **视频合成**：将最终音频和封面图合成为 `<文件名>.mp4`
 - **曲目缓存**：BGM 曲目时长写入 SQLite，只有新增或变化的文件才重新探测
 - **EPUB 导入**：从 EPUB 提取章节文本，保留目录结构
+- **项目删除**：从数据库删除已导入文件及其片段记录，之后可用 `clean` 清理对应音频
 - **音频清理**：删除没有任何数据库记录引用的音频文件
 - **文件 ID**：用短数字 ID 代替中文文件名，输入更省事
 
@@ -67,7 +68,7 @@ TTS HTTP 服务（可并发、可重试）
    ▼
 merge → output/<文件名>_voice.wav
    │
-   ├── BGM 曲库 → bgm → output/<文件名>_bgm.wav
+   ├── BGM 曲库 → bgm → output/<文件名>_bgm.wav + <文件名>_bgm.txt
    │
    ▼
 mix → output/<文件名>.wav
@@ -159,7 +160,7 @@ check:
 - `check.silence_duration`：最短异常静音时长，默认 `1s`
 - `check.concurrency`：并发检测的 ffmpeg 进程数，默认 `4`
 
-> 输出命名：`merge` 生成 `<文件名>_voice.wav`，`bgm` 生成 `<文件名>_bgm.wav`，`mix` 生成最终 `<文件名>.wav`，`video` 生成 `<文件名>.mp4`。从旧版本升级后需要重新执行一次 `merge`。
+> 输出命名：`merge` 生成 `<文件名>_voice.wav`，`bgm` 生成 `<文件名>_bgm.wav` 和曲目清单 `<文件名>_bgm.txt`，`mix` 生成最终 `<文件名>.wav`，`video` 生成 `<文件名>.mp4`。从旧版本升级后需要重新执行一次 `merge`。
 
 ### TTS 接口
 
@@ -214,6 +215,7 @@ Content-Type: application/json
 # 9. 根据人声时长生成 BGM
 ./ttsctl bgm 1
 # -> data/output/novel_bgm.wav
+# -> data/output/novel_bgm.txt（曲目开始时间清单）
 
 # 10. 混音为最终音频
 ./ttsctl mix 1
@@ -271,6 +273,28 @@ check: saved 1 problem(s) to check_results.txt
 ./ttsctl make 1
 ```
 
+删除项目：
+
+```bash
+./ttsctl del 1
+./ttsctl clean
+```
+
+- `del` 只删除数据库中的文件记录和片段，不删除音频文件。
+- 之后执行 `clean` 清理不再被任何片段引用的音频。
+
+BGM 曲目清单：
+
+`bgm` 还会生成同名 `<文件名>_bgm.txt`，记录实际抽中的曲目及其在最终 BGM 中的开始时间，方便按时间定位：
+
+```text
+# start	file
+00:00:00.000	one.mp3
+00:03:21.500	two.flac
+```
+
+开始时间按合成计划计算：计入前面曲目的时长，以及大于 10ms 的曲间静音。
+
 从 EPUB 提取章节：
 
 ```bash
@@ -303,7 +327,7 @@ bgm → mix
 ```
 
 - 处理目录下所有 `.txt` 文件，不递归子目录
-- 默认只生成 `<文件名>_voice.wav`；`--with-bgm` 会继续生成 `_bgm.wav` 和最终 `<文件名>.wav`
+- 默认只生成 `<文件名>_voice.wav`；`--with-bgm` 会继续生成 `_bgm.wav`、`_bgm.txt` 和最终 `<文件名>.wav`
 - 单个文件失败时跳过，继续处理下一个
 - 按 Ctrl-C 会终止整个批次，而不是继续下一个文件
 - 结束时输出成功/失败数量；存在失败文件时退出码为 1
@@ -319,6 +343,7 @@ bgm → mix
 | 命令 | 作用 |
 | --- | --- |
 | `add <file>` | 导入文本文件并创建片段 |
+| `del <file\|id>` | 删除已导入文件及其片段记录（音频留给 `clean` 清理） |
 | `update <file\|id>` | 文本变化后增量更新片段 |
 | `make <file\|id>` | 合成所有待处理片段 |
 | `ls <file\|id> [offset] [limit]` | 查看片段状态和文本 |
@@ -328,7 +353,7 @@ bgm → mix
 | `redo <file\|id> <seq>` | 重做指定片段并自动播放 |
 | `check [--redo]` | 检查片段 WAV 的异常长静音并缓存结果，可选从缓存自动重做 |
 | `merge <file\|id>` | 合并全部语音片段为 `<文件名>_voice.wav` |
-| `bgm <file\|id>` | 生成与人声等长的 BGM，输出 `<文件名>_bgm.wav` |
+| `bgm <file\|id>` | 生成与人声等长的 BGM，输出 `<文件名>_bgm.wav` 和曲目清单 `<文件名>_bgm.txt` |
 | `mix <file\|id>` | 混合人声与 BGM，输出最终 `<文件名>.wav` |
 | `video <file\|id> [--image PATH]` | 用最终音频和封面图生成 `<文件名>.mp4` |
 | `clean [--dry-run]` | 清理未被数据库引用的音频 |
@@ -347,7 +372,7 @@ data/
 ├── tts.db          # 文件、片段状态和 BGM 曲目缓存
 ├── audio/          # 按音色和文本哈希保存的 WAV
 ├── bgm/            # BGM 曲库
-└── output/         # _voice.wav、_bgm.wav、最终 .wav 和 .mp4
+└── output/         # _voice.wav、_bgm.wav、_bgm.txt、最终 .wav 和 .mp4
 ```
 
 `audio/` 下的文件不需要手动管理；`clean` 可以按数据库引用关系清理残留文件。`check` 只读取 `audio/` 下的片段 WAV，`check --redo` 会覆盖其中的异常片段；检测结果缓存写在当前工作目录的 `check_results.txt`。`output/` 下的文件由 `merge`、`bgm`、`mix`、`video` 生成，重复执行会覆盖。
@@ -360,7 +385,7 @@ data/
 | --- | --- |
 | `0` | 成功 |
 | `1` | 参数、配置、IO、数据库、播放器错误，或 `ffmpeg`/`ffprobe`/`audio2video` 缺失 |
-| `2` | 合成失败、重做失败、合并/BGM/混音/视频前置条件不满足、`check` 发现异常/重做后仍有异常，或 `clean --dry-run` 有待删除项 |
+| `2` | 合成失败、重做失败、合并/BGM/混音/视频前置条件不满足或输出写入失败、`check` 发现异常/重做后仍有异常，或 `clean --dry-run` 有待删除项 |
 | `130` | 用户中断 |
 
 ---

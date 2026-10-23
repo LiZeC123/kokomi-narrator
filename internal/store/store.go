@@ -231,6 +231,38 @@ func (s *Store) FileByID(id int64) (*File, error) {
 	return &f, nil
 }
 
+// DeleteFile removes a registered file and all of its segments. Audio files are
+// intentionally left on disk so shared audio is preserved; `clean` removes
+// files that no longer have a database reference.
+func (s *Store) DeleteFile(fileID int64) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var segments int64
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM segments WHERE file_id = ?`, fileID).Scan(&segments); err != nil {
+		return 0, err
+	}
+
+	res, err := tx.Exec(`DELETE FROM files WHERE id = ?`, fileID)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if deleted == 0 {
+		return 0, fmt.Errorf("%w: id %d", ErrNotFound, fileID)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return segments, nil
+}
+
 // ListFiles returns all registered files ordered by ID.
 func (s *Store) ListFiles() ([]FileSummary, error) {
 	rows, err := s.db.Query(

@@ -30,7 +30,7 @@ func Render(ctx context.Context, tool *Tool, plan Plan, outPath string) (time.Du
 
 	var segments []string
 	for i, track := range plan.Tracks {
-		if gap := plan.Gaps[i]; gap > 10*time.Millisecond {
+		if gap := plan.Gaps[i]; gap > minAudibleGap {
 			path := filepath.Join(workDir, fmt.Sprintf("sil_%03d.wav", i))
 			if err := tool.Silence(ctx, gap, path); err != nil {
 				return 0, fmt.Errorf("generate silence before %s: %w", track.Filename, err)
@@ -44,7 +44,7 @@ func Render(ctx context.Context, tool *Tool, plan Plan, outPath string) (time.Du
 		}
 		segments = append(segments, path)
 	}
-	if gap := plan.Gaps[len(plan.Tracks)]; gap > 10*time.Millisecond {
+	if gap := plan.Gaps[len(plan.Tracks)]; gap > minAudibleGap {
 		path := filepath.Join(workDir, "sil_end.wav")
 		if err := tool.Silence(ctx, gap, path); err != nil {
 			return 0, fmt.Errorf("generate trailing silence: %w", err)

@@ -14,14 +14,14 @@ tts:
 
 merge:
   overwrite: true
-  gap_between_segments: 500ms
+  gap_between_segments: 600ms
   leading_trailing_gap: false
 
 bgm:
   dir: ~/Music/网易云音乐
 
 mix:
-  bgm_volume: 0.10
+  bgm_volume: 0.15
 
 video:
   image: ~/Pictures/KokomiReader.jpg

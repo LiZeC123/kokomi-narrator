@@ -235,3 +235,61 @@ func TestSpeechRefsSkipsPunctuation(t *testing.T) {
 		t.Fatalf("hashes = %s/%s", refs[0].TextHash, refs[1].TextHash)
 	}
 }
+
+func TestDeleteFileCascadesSegments(t *testing.T) {
+	st := openTestStore(t)
+	now := "2026-01-01T00:00:00Z"
+	create := func(name, text string) *File {
+		segments, err := textparse.Parse([]byte(text))
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		f := &File{
+			Filename:    name,
+			VoiceKey:    "0123456789abcdef",
+			ContentHash: textparse.HashBytes([]byte(text)),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := st.CreateFile(f, segments); err != nil {
+			t.Fatalf("CreateFile() error = %v", err)
+		}
+		return f
+	}
+
+	first := create("a.txt", "一\n二\n，\n")
+	second := create("b.txt", "三\n")
+
+	deletedSegments, err := st.DeleteFile(first.ID)
+	if err != nil {
+		t.Fatalf("DeleteFile() error = %v", err)
+	}
+	if deletedSegments != 3 {
+		t.Fatalf("deleted segments = %d, want 3", deletedSegments)
+	}
+	if _, err := st.FileByID(first.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("FileByID(deleted) error = %v, want ErrNotFound", err)
+	}
+	segments, err := st.SegmentsByFile(first.ID)
+	if err != nil {
+		t.Fatalf("SegmentsByFile(deleted) error = %v", err)
+	}
+	if len(segments) != 0 {
+		t.Fatalf("deleted file still has %d segments", len(segments))
+	}
+	if _, err := st.FileByID(second.ID); err != nil {
+		t.Fatalf("second file was removed: %v", err)
+	}
+	refs, err := st.SpeechRefs()
+	if err != nil {
+		t.Fatalf("SpeechRefs() error = %v", err)
+	}
+	for _, ref := range refs {
+		if ref.FileID == first.ID {
+			t.Fatalf("deleted file still has speech refs: %+v", ref)
+		}
+	}
+	if _, err := st.DeleteFile(first.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second DeleteFile() error = %v, want ErrNotFound", err)
+	}
+}

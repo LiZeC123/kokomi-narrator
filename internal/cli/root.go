@@ -65,6 +65,7 @@ func newRootCommand() *cobra.Command {
 
 	root.AddCommand(
 		newAddCommand(&configPath),
+		newDelCommand(&configPath),
 		newUpdateCommand(&configPath),
 		newMakeCommand(&configPath),
 		newLsCommand(&configPath),

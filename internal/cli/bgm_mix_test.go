@@ -73,6 +73,32 @@ func TestBgmAndMixEndToEnd(t *testing.T) {
 	if diff := bgmInfo.Duration - 2500*time.Millisecond; diff > 100*time.Millisecond || diff < -100*time.Millisecond {
 		t.Fatalf("bgm duration = %v, want 2.5s (diff %v)", bgmInfo.Duration, diff)
 	}
+	if !strings.Contains(stdout, "a_bgm.txt") {
+		t.Fatalf("bgm output does not mention track list: %q", stdout)
+	}
+	trackListPath := filepath.Join("data", "output", "a_bgm.txt")
+	trackList, err := os.ReadFile(trackListPath)
+	if err != nil {
+		t.Fatalf("read track list: %v", err)
+	}
+	trackLines := strings.Split(strings.TrimSpace(string(trackList)), "\n")
+	if len(trackLines) != 3 {
+		t.Fatalf("track list lines = %d, want header + 2 tracks:\n%s", len(trackLines), trackList)
+	}
+	if trackLines[0] != "# start\tfile" {
+		t.Fatalf("track list header = %q", trackLines[0])
+	}
+	for _, line := range trackLines[1:] {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) != 2 {
+			t.Fatalf("invalid track list line %q", line)
+		}
+		switch fields[1] {
+		case "one.wav", "two.wav", "three.wav":
+		default:
+			t.Fatalf("unexpected track in list: %q", fields[1])
+		}
+	}
 
 	// The second run must reuse cached durations instead of probing again.
 	code, stdout, stderr = runCLI(t, "bgm", "a.txt")

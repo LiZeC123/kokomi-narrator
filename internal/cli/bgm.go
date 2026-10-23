@@ -99,9 +99,15 @@ func runBgm(a *app, fileArg string) error {
 		return exitWithError(2, fmt.Errorf("bgm %s: %w", name, err))
 	}
 
+	trackListPath := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".txt"
+	if err := bgm.WriteTrackList(trackListPath, plan); err != nil {
+		return exitWithError(2, fmt.Errorf("bgm %s: write track list %s: %w", name, trackListPath, err))
+	}
+
 	a.printf("bgm %s: wrote %s (%d tracks, %s silence, %s)\n",
 		name, outputPath, len(plan.Tracks), plan.TotalGap.Round(time.Millisecond),
 		actual.Round(time.Millisecond))
+	a.printf("bgm %s: wrote track list %s (%d tracks)\n", name, trackListPath, len(plan.Tracks))
 	if delta := actual - target; delta > 100*time.Millisecond || delta < -100*time.Millisecond {
 		a.errorf("warning: BGM duration differs from voice by %s\n", delta.Round(time.Millisecond))
 	}

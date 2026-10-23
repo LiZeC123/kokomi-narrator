@@ -233,6 +233,7 @@ func classify(text string) Kind {
 
 ```bash
 ttsctl add a.txt
+ttsctl del a.txt
 ttsctl update a.txt
 ttsctl make a.txt
 ttsctl ls a.txt
@@ -253,8 +254,8 @@ ttsctl clean
 - 只接受当前目录下的纯文件名，不接受路径分隔符和 `..`。
 - 扩展名必须为 `.txt`，大小写不敏感。
 - 文件名作为唯一 key，大小写敏感。
-- `add` 已存在报错；`update` 不存在报错。
-- `make`、`ls`、`redo`、`merge`、`bgm`、`mix`、`video` 一次只处理一个文件。
+- `add` 已存在报错；`update` 不存在报错；`del` 不存在报错。
+- `del`、`update`、`make`、`ls`、`redo`、`merge`、`bgm`、`mix`、`video` 一次只处理一个文件。
 - `clean`、`check` 为全局操作。
 - `bgm`、`mix`、`video` 支持文件 ID 或原文件名。
 
@@ -262,7 +263,7 @@ ttsctl clean
 
 - `0`：成功
 - `1`：参数、配置、IO、数据库错误，或 `ffmpeg`/`ffprobe`/`audio2video` 缺失
-- `2`：转换失败、重做失败、合并/BGM/混音/视频前置条件不满足、`clean --dry-run` 有待删除项，或 `check` 发现异常/重做后仍有异常
+- `2`：转换失败、重做失败、合并/BGM/混音/视频前置条件不满足或输出写入失败、`clean --dry-run` 有待删除项，或 `check` 发现异常/重做后仍有异常
 - `130`：用户中断
 
 ---
@@ -559,6 +560,7 @@ audio_dir/<voice_key>/<hash前2位>/*.wav
 - `--dry-run` 只列出待删除项，不删除；有待删除项时退出码 2。
 - 默认直接删除并打印统计，不交互确认。
 - `clean` 只删文件，不修改数据库。
+- 要从数据库删除整个项目记录，使用 `del`；删除后原音频会变成无引用文件，可由 `clean` 清理。
 
 ---
 
@@ -631,7 +633,14 @@ output_dir/<base>_voice.wav
   - 先写 `<base>_bgm.wav.tmp`；
   - 用 `wavutil` 校验；
   - 原子 `rename`。
-- 重复执行会覆盖已有 BGM。
+- 同时输出曲目清单 `output_dir/<base>_bgm.txt`：
+  - 每行记录一个实际抽中的曲目及其在最终 BGM 中的开始时间；
+  - 格式为 `开始时间<TAB>文件名`，开始时间使用 `HH:MM:SS.mmm`；
+  - 第一行是 `# start<TAB>file` 注释表头；
+  - 开始时间按合成计划计算：累计前置静音（仅大于 10ms 的 gap）+ 前面曲目的时长；
+  - 曲目清单同样先写 `.tmp`，再原子 `rename`；
+  - 写入失败时 `bgm` 退出码 2。
+- 重复执行会覆盖已有 BGM 和曲目清单。
 - 中断时清理临时文件和 `.tmp`，退出码 130。
 
 ## 16.4 输出摘要
@@ -639,6 +648,7 @@ output_dir/<base>_voice.wav
 ```text
 bgm a.txt: library=./data/bgm files=128 cached=124 probed=4 removed=0 invalid=0 target=1h2m3s
 bgm a.txt: wrote data/output/a_bgm.wav (42 tracks, 0s silence, 1h2m3.021s)
+bgm a.txt: wrote track list data/output/a_bgm.txt (42 tracks)
 ```
 
 ---
@@ -834,3 +844,30 @@ still bad entries:
 - 删除 `check_results.txt` 后，下一次 `check --redo` 会退化为全量检测。
 - 缓存记录的是写入时的检测结果；修改配置阈值后需要重新执行 `check` 才会刷新。
 - 缓存写入使用 `check_results.txt.tmp` + 原子 `rename`；写入失败退出码 1。
+
+---
+
+# 20. `del` 指令
+
+```bash
+ttsctl del a.txt
+ttsctl del 1
+```
+
+语义：从数据库删除一个已经 `add` 的文件及其全部 `segments` 记录。
+
+流程：
+
+1. 使用文件 ID 或原文件名定位 `files` 记录；不存在时报错，退出码 1。
+2. 在事务内统计该文件的片段数。
+3. 删除 `files` 记录；`segments` 通过 `ON DELETE CASCADE` 自动删除。
+4. 输出删除的文件名、ID 和片段数。
+5. 不删除磁盘上的音频文件，也不删除 `output_dir` 下的合并、BGM、混音或视频产物。
+6. 提示用户后续可执行 `ttsctl clean` 清理不再被任何 speech 片段引用的音频。
+
+规则：
+
+- 只删除数据库记录，不修改其他文件。
+- 如果同一段文本的音频还被其他文件引用，`clean` 会保留该音频。
+- `del` 不交互确认；删除后不能通过 `ttsctl` 恢复，只能重新 `add` 和 `make`。
+- 退出码：成功 `0`；文件不存在、数据库或参数错误 `1`。
