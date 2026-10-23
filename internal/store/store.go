@@ -51,6 +51,17 @@ type Segment struct {
 	UpdatedAt string
 }
 
+// SpeechRef links one speech segment to the file that owns it. A single audio
+// file can be referenced by many speech refs because audio is content-addressed.
+type SpeechRef struct {
+	FileID   int64
+	Filename string
+	VoiceKey string
+	Seq      int
+	Text     string
+	TextHash string
+}
+
 type SyncUpdate struct {
 	ID     int64
 	Status string
@@ -267,6 +278,32 @@ func (s *Store) SegmentsByFile(fileID int64) ([]Segment, error) {
 		return nil, err
 	}
 	return segments, nil
+}
+
+// SpeechRefs returns every speech segment together with its file. The result is
+// ordered by file ID and seq so callers can build deterministic reports.
+func (s *Store) SpeechRefs() ([]SpeechRef, error) {
+	rows, err := s.db.Query(
+		`SELECT f.id, f.filename, f.voice_key, s.seq, s.text, s.text_hash
+		 FROM segments s
+		 JOIN files f ON f.id = s.file_id
+		 WHERE s.kind = 'speech'
+		 ORDER BY f.id, s.seq`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []SpeechRef
+	for rows.Next() {
+		var ref SpeechRef
+		if err := rows.Scan(&ref.FileID, &ref.Filename, &ref.VoiceKey,
+			&ref.Seq, &ref.Text, &ref.TextHash); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 func (s *Store) SegmentBySeq(fileID int64, seq int) (*Segment, error) {

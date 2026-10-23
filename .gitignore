@@ -2,6 +2,7 @@
 data/
 *.txt
 *.epub
+check_results.txt.tmp
 
 # build
 kokomi-narrator

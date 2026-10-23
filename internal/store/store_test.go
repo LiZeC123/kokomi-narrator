@@ -199,3 +199,39 @@ func TestFileByIDAndListFiles(t *testing.T) {
 		t.Fatalf("files[1] = %+v, want id=%d segments=1", files[1], second.ID)
 	}
 }
+
+func TestSpeechRefsSkipsPunctuation(t *testing.T) {
+	st := openTestStore(t)
+	now := "2026-01-01T00:00:00Z"
+	segments, err := textparse.Parse([]byte("子1\n，\n子2\n"))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	f := &File{
+		Filename:    "a.txt",
+		VoiceKey:    "0123456789abcdef",
+		ContentHash: textparse.HashBytes([]byte("子1\n，\n子2\n")),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := st.CreateFile(f, segments); err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+
+	refs, err := st.SpeechRefs()
+	if err != nil {
+		t.Fatalf("SpeechRefs() error = %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("refs = %d, want 2: %+v", len(refs), refs)
+	}
+	if refs[0].FileID != f.ID || refs[0].Filename != "a.txt" || refs[0].VoiceKey != f.VoiceKey {
+		t.Fatalf("refs[0] = %+v", refs[0])
+	}
+	if refs[0].Seq != 1 || refs[1].Seq != 3 {
+		t.Fatalf("seqs = %d/%d, want 1/3", refs[0].Seq, refs[1].Seq)
+	}
+	if refs[0].TextHash != textparse.HashText("子1") || refs[1].TextHash != textparse.HashText("子2") {
+		t.Fatalf("hashes = %s/%s", refs[0].TextHash, refs[1].TextHash)
+	}
+}

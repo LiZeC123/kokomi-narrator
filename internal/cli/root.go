@@ -69,6 +69,7 @@ func newRootCommand() *cobra.Command {
 		newMakeCommand(&configPath),
 		newLsCommand(&configPath),
 		newRedoCommand(&configPath),
+		newCheckCommand(&configPath),
 		newMergeCommand(&configPath),
 		newBgmCommand(&configPath),
 		newMixCommand(&configPath),

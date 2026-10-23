@@ -32,6 +32,7 @@ Kokomi Narrator 把“文本文件”拆成“语音片段”来管理：
 - **断点续跑**：中断或进程异常退出后，下次执行 `make` 会继续处理未完成片段
 - **状态查看**：按文件列出片段、状态、错误和文本
 - **文本搜索**：按关键字找到对应的片段序号（seq）
+- **音频质量检查**：检测已生成片段中的异常长静音，按文件 ID 和 seq 列出问题；结果缓存到当前目录，`--redo` 复用缓存并一键重做
 - **试听与返修**：播放某一段音频；重做后自动播放新音频
 - **人声合并**：按顺序合并片段，并在片段之间插入可配置的静音，输出 `<文件名>_voice.wav`
 - **BGM 合成**：从配置的曲库随机选曲，按人声时长生成 `<文件名>_bgm.wav`
@@ -81,6 +82,7 @@ mix → output/<文件名>.wav
 - **原子写入**：音频先写临时文件，校验通过后再替换目标文件，避免留下半截 WAV。
 - **增量更新**：文本变化时按内容哈希匹配旧片段，尽量保留原状态，只调整片段顺序。
 - **安全中断**：中断时把正在处理的片段恢复为 `pending`，下次继续。
+- **质量检查**：`check` 用 `ffmpeg silencedetect` 扫描片段 WAV，按 `file ID + seq` 列出异常长静音，并把结果保存为当前目录的 `check_results.txt`；`--redo` 优先读取该文件，跳过昂贵的全量检测，逐个重做并复检。
 - **BGM 曲目缓存**：曲目时长按 `size + mtime` 缓存，未变化的曲目不再调用 `ffprobe`。
 
 ---
@@ -93,6 +95,7 @@ mix → output/<文件名>.wav
 - 一个可用的 TTS HTTP 服务，返回 PCM WAV
 - `bgm` 需要 `ffmpeg` 和 `ffprobe` 在 PATH 中
 - `mix` 需要 `ffmpeg` 在 PATH 中
+- `check` 需要 `ffmpeg` 在 PATH 中
 - `video` 需要 `audio2video` 在 PATH 中
 - 试听功能需要系统播放器；macOS 自带 `afplay`，Linux 可使用 `ffplay` 或 `mpv`
 
@@ -135,6 +138,11 @@ mix:
 
 video:
   image: ./data/image.jpg
+
+check:
+  silence_db: -45
+  silence_duration: 1s
+  concurrency: 4
 ```
 
 常用配置说明：
@@ -147,6 +155,9 @@ video:
 - `bgm.dir`：BGM 曲库目录，支持 `~/...`、绝对路径和项目外目录，`bgm` 会扫描该目录下的常见音频格式
 - `mix.bgm_volume`：混音时 BGM 的音量，范围 `0.0 ~ 1.0`，默认 `0.10` 即 10%
 - `video.image`：视频封面图，支持 `~/...` 和绝对路径；可用 `video --image` 覆盖
+- `check.silence_db`：静音检测阈值，默认 `-45` dB
+- `check.silence_duration`：最短异常静音时长，默认 `1s`
+- `check.concurrency`：并发检测的 ffmpeg 进程数，默认 `4`
 
 > 输出命名：`merge` 生成 `<文件名>_voice.wav`，`bgm` 生成 `<文件名>_bgm.wav`，`mix` 生成最终 `<文件名>.wav`，`video` 生成 `<文件名>.mp4`。从旧版本升级后需要重新执行一次 `merge`。
 
@@ -185,30 +196,73 @@ Content-Type: application/json
 # 4. 查看片段状态
 ./ttsctl ls 1
 
-# 5. 按文字找到片段序号
+# 5. 检查异常长静音，并可自动重做问题片段
+./ttsctl check
+./ttsctl check --redo
+
+# 6. 按文字找到片段序号
 ./ttsctl find 1 "飞船"
 
-# 6. 试听，或重做（重做成功后会自动播放）
+# 7. 试听，或重做（重做成功后会自动播放）
 ./ttsctl play 1 42
 ./ttsctl redo 1 42
 
-# 7. 合并人声
+# 8. 合并人声
 ./ttsctl merge 1
 # -> data/output/novel_voice.wav
 
-# 8. 根据人声时长生成 BGM
+# 9. 根据人声时长生成 BGM
 ./ttsctl bgm 1
 # -> data/output/novel_bgm.wav
 
-# 9. 混音为最终音频
+# 10. 混音为最终音频
 ./ttsctl mix 1
 # -> data/output/novel.wav
 
-# 10. 合成为视频
+# 11. 合成为视频
 ./ttsctl video 1
 # -> data/output/novel.mp4
 # 封面默认读取 video.image，可用 --image 覆盖
 ```
+
+### 检查异常音频
+
+TTS 服务偶尔会返回开头或中间带有异常长静音的 WAV。`check` 会用 `ffmpeg silencedetect` 扫描 `audio/` 下所有片段，并按 `file ID + seq` 列出问题：
+
+```bash
+./ttsctl check
+```
+
+```text
+check: 153 wav file(s), silence_db=-45dB, silence_duration=1s
+
+FILE_ID  SEQ  FILE        HASH      DURATION  SILENCES
+1        42   novel.txt   a1b2c3d4  31.66s    3.03s-6.86s (3.84s)
+                                              10.00s-12.72s (2.72s)
+check: 1 problematic wav(s), 1 segment(s) affected
+check: saved 1 problem(s) to check_results.txt
+```
+
+`check` 还会把结果写入当前目录的 `check_results.txt`（每次执行都会覆盖旧缓存）。文件是普通文本，每行一个问题片段，可以直接编辑或删除某一行：
+
+```text
+# file_id	seq	text_hash	silences
+1	42	<64位text_hash>	3.03s-6.86s (3.84s); 10.00s-12.72s (2.72s)
+```
+
+加上 `--redo` 时会优先读取 `check_results.txt`，跳过全量检测，自动重新合成缓存中的问题片段并立即复检：
+
+```bash
+./ttsctl check --redo
+```
+
+- 缓存文件不存在时，`--redo` 会先执行一次全量检测。
+- 重做成功后会更新对应片段状态，并打印成功数量。
+- 重做失败或复检仍有静音的条目会逐条列出 `file id`、`seq`、文件名和原因，方便手动复核。
+- 全部修复时退出码为 0；仍有失败条目时退出码为 2。
+- 重做结束后会用未解决条目覆盖缓存；全部修复时缓存只保留表头。
+- 想强制重新检测时，删除 `check_results.txt` 后执行 `check` 或 `check --redo`。
+- 检测阈值来自 `check.silence_db` 和 `check.silence_duration`，不提供命令行覆盖。
 
 修改文本后：
 
@@ -272,6 +326,7 @@ bgm → mix
 | `find <file\|id> <text>` | 按文字搜索片段，输出 seq |
 | `play <file\|id> <seq>` | 播放指定片段的音频 |
 | `redo <file\|id> <seq>` | 重做指定片段并自动播放 |
+| `check [--redo]` | 检查片段 WAV 的异常长静音并缓存结果，可选从缓存自动重做 |
 | `merge <file\|id>` | 合并全部语音片段为 `<文件名>_voice.wav` |
 | `bgm <file\|id>` | 生成与人声等长的 BGM，输出 `<文件名>_bgm.wav` |
 | `mix <file\|id>` | 混合人声与 BGM，输出最终 `<文件名>.wav` |
@@ -295,7 +350,7 @@ data/
 └── output/         # _voice.wav、_bgm.wav、最终 .wav 和 .mp4
 ```
 
-`audio/` 下的文件不需要手动管理；`clean` 可以按数据库引用关系清理残留文件。`output/` 下的文件由 `merge`、`bgm`、`mix`、`video` 生成，重复执行会覆盖。
+`audio/` 下的文件不需要手动管理；`clean` 可以按数据库引用关系清理残留文件。`check` 只读取 `audio/` 下的片段 WAV，`check --redo` 会覆盖其中的异常片段；检测结果缓存写在当前工作目录的 `check_results.txt`。`output/` 下的文件由 `merge`、`bgm`、`mix`、`video` 生成，重复执行会覆盖。
 
 ---
 
@@ -305,7 +360,7 @@ data/
 | --- | --- |
 | `0` | 成功 |
 | `1` | 参数、配置、IO、数据库、播放器错误，或 `ffmpeg`/`ffprobe`/`audio2video` 缺失 |
-| `2` | 合成失败、重做失败、合并/BGM/混音/视频前置条件不满足，或 `clean --dry-run` 有待删除项 |
+| `2` | 合成失败、重做失败、合并/BGM/混音/视频前置条件不满足、`check` 发现异常/重做后仍有异常，或 `clean --dry-run` 有待删除项 |
 | `130` | 用户中断 |
 
 ---
@@ -328,6 +383,9 @@ data/
 - `bgm` 只选择完整曲目；比目标时长长的曲目会被排除，剩余不足一首的时长用静音补齐
 - `mix` 需要 `ffmpeg`，BGM 音量由 `mix.bgm_volume` 控制
 - `mix` 以较长输入为时长；正常情况下 BGM 与人声等长，差异较大时会打印 warning
+- `check` 需要 `ffmpeg`，只检测长静音，不检测一般性杂音；检测整个文件，因此刻意的长停顿也会被标记，可通过 `check.silence_duration` 调整
+- `check` 只扫描 `audio_dir` 下的片段 WAV；`output_dir` 的合并/混音产物不在检查范围
+- `check --redo` 会信任当前目录的 `check_results.txt`；修改阈值或数据库后如果缓存过期，请删除该文件重新执行 `check`
 - `video` 需要 `audio2video` 在 PATH 中，并先通过 `mix` 生成最终音频
 - 视频封面支持 `audio2video` 能识别的格式（PNG/JPG/JPEG/BMP/GIF）
 - `add` 和 `update` 默认只处理当前目录下的纯文件名

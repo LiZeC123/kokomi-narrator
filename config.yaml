@@ -25,3 +25,8 @@ mix:
 
 video:
   image: ~/Pictures/KokomiReader.jpg
+
+check:
+  silence_db: -45
+  silence_duration: 1s
+  concurrency: 12

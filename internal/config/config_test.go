@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -182,5 +183,66 @@ tts:
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("Load() accepted concurrency 0")
+	}
+}
+
+func TestCheckDefaultsAndOverride(t *testing.T) {
+	defaults := Default().Check
+	if defaults.SilenceDB != -45 || defaults.SilenceDuration.Std() != time.Second || defaults.Concurrency != 4 {
+		t.Fatalf("check defaults = %+v, want -45/1s/4", defaults)
+	}
+
+	base := `database: ./data/tts.db
+audio_dir: ./data/audio
+output_dir: ./data/output
+tts:
+  url: http://127.0.0.1:8080/tts
+  character: default
+`
+	cfg, err := Load(writeConfig(t, base))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Check.SilenceDB != -45 || cfg.Check.SilenceDuration.Std() != time.Second || cfg.Check.Concurrency != 4 {
+		t.Fatalf("check defaults = %+v", cfg.Check)
+	}
+
+	cfg, err = Load(writeConfig(t, base+`check:
+  silence_db: -50
+  silence_duration: 1500ms
+  concurrency: 2
+`))
+	if err != nil {
+		t.Fatalf("Load() with check override error = %v", err)
+	}
+	if cfg.Check.SilenceDB != -50 || cfg.Check.SilenceDuration.Std() != 1500*time.Millisecond || cfg.Check.Concurrency != 2 {
+		t.Fatalf("check override = %+v", cfg.Check)
+	}
+}
+
+func TestCheckValidation(t *testing.T) {
+	base := `database: ./data/tts.db
+audio_dir: ./data/audio
+output_dir: ./data/output
+tts:
+  url: http://127.0.0.1:8080/tts
+  character: default
+`
+	for name, body := range map[string]string{
+		"positive silence_db": `check:
+  silence_db: 1
+`,
+		"zero silence_duration": `check:
+  silence_duration: 0s
+`,
+		"zero concurrency": `check:
+  concurrency: 0
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, base+body)); err == nil {
+				t.Fatalf("Load() accepted %s", name)
+			}
+		})
 	}
 }

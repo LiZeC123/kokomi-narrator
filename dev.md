@@ -8,6 +8,7 @@
 - 日志：标准库 `log/slog`
 - WAV 处理：标准库自行解析 RIFF/WAVE
 - BGM/混音：外部 `ffmpeg` / `ffprobe`（音频库解码、拼接、混音）
+- 音频质量检查：外部 `ffmpeg` 的 `silencedetect` 滤镜
 - 视频合成：外部 `audio2video`（音频 + 封面图 → MP4）
 
 
@@ -44,6 +45,11 @@ mix:
 
 video:
   image: ./data/image.jpg
+
+check:
+  silence_db: -45
+  silence_duration: 1s
+  concurrency: 4
 ```
 
 说明：
@@ -67,6 +73,9 @@ data/audio/9f8e7d6c5b4a3210/a1/a1b2c3...（64位）.wav
 - `bgm.dir` 是 BGM 曲库目录，支持 `~`、`~/...`、绝对路径和项目外目录；`bgm` 只读该配置，不提供 `--dir`。
 - `mix.bgm_volume` 是混音时 BGM 的线性音量，范围 `0.0 ~ 1.0`，默认 `0.10`。
 - `video.image` 是视频封面图，支持 `~`、`~/...` 和绝对路径；可通过 `video --image` 覆盖。
+- `check.silence_db` 是 `silencedetect` 的静音阈值（dB），默认 `-45`，只能为 0 或负数。
+- `check.silence_duration` 是最短静音时长，默认 `1s`。
+- `check.concurrency` 是同时运行的检测进程数，默认 `4`，必须大于 0。
 
 ---
 
@@ -229,6 +238,8 @@ ttsctl make a.txt
 ttsctl ls a.txt
 ttsctl ls a.txt 100 20
 ttsctl redo a.txt 12
+ttsctl check
+ttsctl check --redo
 ttsctl merge a.txt
 ttsctl bgm a.txt
 ttsctl mix a.txt
@@ -244,14 +255,14 @@ ttsctl clean
 - 文件名作为唯一 key，大小写敏感。
 - `add` 已存在报错；`update` 不存在报错。
 - `make`、`ls`、`redo`、`merge`、`bgm`、`mix`、`video` 一次只处理一个文件。
-- `clean` 为全局操作。
+- `clean`、`check` 为全局操作。
 - `bgm`、`mix`、`video` 支持文件 ID 或原文件名。
 
 退出码：
 
 - `0`：成功
 - `1`：参数、配置、IO、数据库错误，或 `ffmpeg`/`ffprobe`/`audio2video` 缺失
-- `2`：转换失败、重做失败、合并/BGM/混音/视频前置条件不满足，或 `clean --dry-run` 有待删除项
+- `2`：转换失败、重做失败、合并/BGM/混音/视频前置条件不满足、`clean --dry-run` 有待删除项，或 `check` 发现异常/重做后仍有异常
 - `130`：用户中断
 
 ---
@@ -357,7 +368,7 @@ sync: 2 missing -> pending, 1 found -> success, 1 processing -> pending
 - 文件存在且合法即视为 `success`，即使数据库原本是 `failed`。
 - 文件缺失即视为 `pending`，即使数据库原本是 `success`。
 - 非法音频只改状态为 `pending`，不删除文件；下次 `make` 会覆盖写入。
-- 不单独提供 `check` 指令。
+- 音频质量检查由 `check` 指令负责，不影响 `make` 的状态同步。
 
 ## 9.2 统计与进度条
 
@@ -705,3 +716,121 @@ audio2video -a <最终音频> -i <封面图> -o <output_dir>/<base>.tmp.mp4
 5. 校验临时文件存在且非空，然后原子 `rename` 为 `output_dir/<base>.mp4`。
 6. 重复执行会覆盖已有视频。
 7. 中断时删除 `.tmp` 文件，退出码 130。
+
+---
+
+# 19. `check` 指令
+
+```bash
+ttsctl check
+ttsctl check --redo
+```
+
+目标：检查已经生成的片段 WAV 是否存在异常静音，并把问题音频定位到 `file_id + seq`。检测阈值只从配置读取，不提供命令行覆盖参数。检测结果写入当前目录的 `check_results.txt`，`--redo` 优先读取该文件，避免重复执行昂贵的全量检测。
+
+## 19.1 扫描范围
+
+- 扫描 `audio_dir/<voice_key>/<hash前2位>/*.wav`。
+- 通过数据库 `segments` + `files` 把 `(voice_key, text_hash)` 映射到所有引用它的 `(file_id, seq)`。
+- 一个 WAV 可能被多个文件、多个片段共享；输出时每个 `(file_id, seq)` 各占一行。
+- 没有任何 `speech` 片段引用的 WAV 只打印 warning 并跳过，提示执行 `clean`；不参与检测和重做。
+- 非 `.wav` 文件忽略；路径结构不符合约定的 WAV 打印 warning 并跳过。
+- 不检查 `output_dir` 下的 `_voice.wav`、`_bgm.wav` 和最终 `.wav`，这些文件没有 seq 语义。
+
+## 19.2 检测规则
+
+对每个 WAV 运行：
+
+```bash
+ffmpeg -hide_banner -nostdin -nostats \
+  -i <wav> \
+  -af "silencedetect=n=<check.silence_db>dB:d=<check.silence_duration>" \
+  -f null -
+```
+
+- 检测整个文件，任意位置出现持续时间达到 `check.silence_duration` 的静音都算异常，不只看开头。
+- 解析 ffmpeg stderr 中的 `silence_start`、`silence_end` 和 `silence_duration`。
+- ffmpeg 无法解码的文件也作为异常列出，并允许 `--redo`。
+- 检测按 `check.concurrency` 并发执行；结果按 `file_id, seq` 排序后输出。
+- `--redo` 的合成并发度使用 `tts.concurrency`。
+- `ffmpeg` 不在 PATH 时退出码 1。
+
+## 19.3 输出
+
+```text
+check: 153 wav file(s), silence_db=-45dB, silence_duration=1s
+
+FILE_ID  SEQ  FILE        HASH      DURATION  SILENCES
+1        42   novel.txt   a1b2c3d4  31.66s    3.03s-6.86s (3.84s)
+                                              10.00s-12.72s (2.72s)
+2        7    other.txt   a1b2c3d4  31.66s    (same wav)
+check: 1 problematic wav(s), 2 segment(s) affected
+check: saved 2 problem(s) to check_results.txt
+```
+
+- 同一 WAV 的静音明细只在第一行展开，后续引用行标记 `(same wav)`。
+- 无异常时输出 `check: all clean`，退出码 0。
+- 无论是否有异常，`check` 都会覆盖写入当前目录的 `check_results.txt`；无异常时只保留表头。
+- 有异常时退出码 2，不做任何数据库状态修改。
+- `check` 只做质量检查；片段状态仍表示“是否成功生成过合法 WAV”，不代表音频质量。
+
+## 19.4 `--redo`
+
+启动时：
+
+- 若当前目录存在 `check_results.txt`，直接读取并跳过全量检测。
+- 若不存在，则先执行一次 `check` 的全量检测，再进行重做。
+
+对每个有问题的唯一 WAV：
+
+1. 检查该 WAV 对应文件的 `voice_key` 是否等于当前配置音色；不一致时跳过并记录失败原因，提示先执行 `make`。
+2. 使用当前 TTS 配置重新合成该 `text_hash` 的文本，网络/HTTP 失败沿用 `tts.retries`。
+3. 通过 `.tmp` + 校验 + 原子 `rename` 替换目标 WAV。
+4. 更新所有共享该 `text_hash` 的文件的片段状态为 `success`，清空 `error`。
+5. 立即用相同阈值重新检测：
+   - 无异常：记为 fixed。
+   - 仍有异常：记为 still bad，继续处理后续条目。
+   - 检测失败：记为 still bad，继续处理后续条目。
+6. TTS 或写入失败：
+   - 若旧 WAV 仍是合法 PCM，保持/恢复 `success`；
+   - 否则将同哈希片段置为 `failed` 并记录错误；
+   - 记为 failed，继续处理后续条目。
+7. `--redo` 不自动播放音频。
+8. 所有条目处理完毕后输出汇总：
+
+```text
+redo: fixed=2 wav(s)/4 segment(s), failed=1 wav(s), still_bad=1 wav(s), unresolved_segments=3
+failed entries:
+  file=3 seq=17 fail.txt hash=a1b2c3d4: HTTP 500: ...
+still bad entries:
+  file=1 seq=42 novel.txt hash=a1b2c3d4: 3.03s-6.86s (3.84s)
+```
+
+- 全部修复时退出码 0。
+- 仍有 failed 或 still bad 条目时退出码 2，方便用户按 `file id + seq` 手动复核或再次重做。
+- 用户中断时退出码 130；已经完成的 WAV 和数据库更新保留，未处理的条目不再继续。
+- 重做结束后会用剩余未解决条目覆盖 `check_results.txt`；全部修复时只保留表头。
+
+## 19.5 检测结果缓存
+
+文件位置：当前工作目录下的 `check_results.txt`，UTF-8 文本。
+
+格式：
+
+```text
+# file_id	seq	text_hash	silences
+1	42	<64位text_hash>	3.03s-6.86s (3.84s); 10.00s-12.72s (2.72s)
+```
+
+规则：
+
+- 每行一个 `(file_id, seq)` 问题条目，字段用制表符分隔；也兼容空格分隔。
+- 第一行是 `#` 开头的注释表头，解析时忽略；空行和其他 `#` 行也忽略。
+- `silences` 是给人看的静音摘要，`--redo` 不依赖它；未解决条目会写回，其中 still bad 条目使用本次复检的新摘要。
+- 用户可以删除某行来跳过该片段，或修改 `file_id` / `seq` / `text_hash` 来指定条目。
+- `--redo` 读取缓存后仍会用数据库校验 `file_id + seq` 和 `text_hash`；不匹配的过期条目会打印 warning 并跳过。
+- 无法解析的行会打印 warning 并跳过；如果存在无法解析的行且没有任何有效行，退出码 1，提示删除文件或重新执行 `check`。
+- 缓存文件存在但只有表头/空行时，视为“没有已知问题”，`--redo` 不会重新检测。
+- 删除 `check_results.txt` 后，下一次 `check --redo` 会退化为全量检测。
+- 缓存记录的是写入时的检测结果；修改配置阈值后需要重新执行 `check` 才会刷新。
+- 缓存写入使用 `check_results.txt.tmp` + 原子 `rename`；写入失败退出码 1。

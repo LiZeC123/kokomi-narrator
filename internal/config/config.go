@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -44,6 +45,7 @@ type Config struct {
 	BGM   BGM   `yaml:"bgm"`
 	Mix   Mix   `yaml:"mix"`
 	Video Video `yaml:"video"`
+	Check Check `yaml:"check"`
 }
 
 type TTS struct {
@@ -74,6 +76,13 @@ type Video struct {
 	Image string `yaml:"image"`
 }
 
+// Check controls the audio quality inspection performed by `ttsctl check`.
+type Check struct {
+	SilenceDB       float64  `yaml:"silence_db"`
+	SilenceDuration Duration `yaml:"silence_duration"`
+	Concurrency     int      `yaml:"concurrency"`
+}
+
 func Default() *Config {
 	return &Config{
 		Database:  "./data/tts.db",
@@ -101,6 +110,11 @@ func Default() *Config {
 		},
 		Video: Video{
 			Image: "./data/image.jpg",
+		},
+		Check: Check{
+			SilenceDB:       -45,
+			SilenceDuration: Duration(1 * time.Second),
+			Concurrency:     4,
 		},
 	}
 }
@@ -165,6 +179,18 @@ func (c *Config) validate() error {
 	}
 	if strings.TrimSpace(c.Video.Image) == "" {
 		return fmt.Errorf("video.image must not be empty")
+	}
+	if math.IsNaN(c.Check.SilenceDB) || math.IsInf(c.Check.SilenceDB, 0) {
+		return fmt.Errorf("check.silence_db must be a finite number")
+	}
+	if c.Check.SilenceDB > 0 {
+		return fmt.Errorf("check.silence_db must not be positive")
+	}
+	if c.Check.SilenceDuration.Std() <= 0 {
+		return fmt.Errorf("check.silence_duration must be greater than zero")
+	}
+	if c.Check.Concurrency < 1 {
+		return fmt.Errorf("check.concurrency must be at least 1")
 	}
 
 	switch strings.ToLower(strings.TrimSpace(c.LogLevel)) {
