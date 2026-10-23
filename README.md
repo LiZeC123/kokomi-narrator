@@ -32,10 +32,11 @@ Kokomi Narrator 把“文本文件”拆成“语音片段”来管理：
 - **断点续跑**：中断或进程异常退出后，下次执行 `make` 会继续处理未完成片段
 - **状态查看**：按文件列出片段、状态、错误和文本
 - **文本搜索**：按关键字找到对应的片段序号（seq）
-- **试听与返修**：播放某一段音频，或重做后立即试听
+- **试听与返修**：播放某一段音频；重做后自动播放新音频
 - **人声合并**：按顺序合并片段，并在片段之间插入可配置的静音，输出 `<文件名>_voice.wav`
 - **BGM 合成**：从配置的曲库随机选曲，按人声时长生成 `<文件名>_bgm.wav`
 - **最终混音**：将人声与 BGM 按可配置音量混合为 `<文件名>.wav`，以较长输入为时长
+- **视频合成**：将最终音频和封面图合成为 `<文件名>.mp4`
 - **曲目缓存**：BGM 曲目时长写入 SQLite，只有新增或变化的文件才重新探测
 - **EPUB 导入**：从 EPUB 提取章节文本，保留目录结构
 - **音频清理**：删除没有任何数据库记录引用的音频文件
@@ -69,6 +70,8 @@ merge → output/<文件名>_voice.wav
    │
    ▼
 mix → output/<文件名>.wav
+   │
+   └── video → output/<文件名>.mp4
 ```
 
 几个关键设计：
@@ -90,6 +93,7 @@ mix → output/<文件名>.wav
 - 一个可用的 TTS HTTP 服务，返回 PCM WAV
 - `bgm` 需要 `ffmpeg` 和 `ffprobe` 在 PATH 中
 - `mix` 需要 `ffmpeg` 在 PATH 中
+- `video` 需要 `audio2video` 在 PATH 中
 - 试听功能需要系统播放器；macOS 自带 `afplay`，Linux 可使用 `ffplay` 或 `mpv`
 
 ### 构建
@@ -124,10 +128,13 @@ merge:
   leading_trailing_gap: false
 
 bgm:
-  dir: ./data/bgm
+  dir: ./data/bgm        # 支持 ~/... 和绝对路径
 
 mix:
   bgm_volume: 0.10
+
+video:
+  image: ./data/image.jpg
 ```
 
 常用配置说明：
@@ -137,10 +144,11 @@ mix:
 - `tts.headers`：需要认证时附加的请求头
 - `merge.gap_between_segments`：片段之间的静音长度
 - `merge.leading_trailing_gap`：是否在整段音频首尾也插入静音
-- `bgm.dir`：BGM 曲库目录，`bgm` 会扫描该目录下的常见音频格式
+- `bgm.dir`：BGM 曲库目录，支持 `~/...`、绝对路径和项目外目录，`bgm` 会扫描该目录下的常见音频格式
 - `mix.bgm_volume`：混音时 BGM 的音量，范围 `0.0 ~ 1.0`，默认 `0.10` 即 10%
+- `video.image`：视频封面图，支持 `~/...` 和绝对路径；可用 `video --image` 覆盖
 
-> 输出命名：`merge` 生成 `<文件名>_voice.wav`，`bgm` 生成 `<文件名>_bgm.wav`，`mix` 生成最终 `<文件名>.wav`。从旧版本升级后需要重新执行一次 `merge`。
+> 输出命名：`merge` 生成 `<文件名>_voice.wav`，`bgm` 生成 `<文件名>_bgm.wav`，`mix` 生成最终 `<文件名>.wav`，`video` 生成 `<文件名>.mp4`。从旧版本升级后需要重新执行一次 `merge`。
 
 ### TTS 接口
 
@@ -180,9 +188,9 @@ Content-Type: application/json
 # 5. 按文字找到片段序号
 ./ttsctl find 1 "飞船"
 
-# 6. 试听，或重做后立即试听
+# 6. 试听，或重做（重做成功后会自动播放）
 ./ttsctl play 1 42
-./ttsctl redo 1 42 --play
+./ttsctl redo 1 42
 
 # 7. 合并人声
 ./ttsctl merge 1
@@ -195,6 +203,11 @@ Content-Type: application/json
 # 9. 混音为最终音频
 ./ttsctl mix 1
 # -> data/output/novel.wav
+
+# 10. 合成为视频
+./ttsctl video 1
+# -> data/output/novel.mp4
+# 封面默认读取 video.image，可用 --image 覆盖
 ```
 
 修改文本后：
@@ -258,10 +271,11 @@ bgm → mix
 | `files` | 列出已注册文件和数字 ID |
 | `find <file\|id> <text>` | 按文字搜索片段，输出 seq |
 | `play <file\|id> <seq>` | 播放指定片段的音频 |
-| `redo <file\|id> <seq> [--play]` | 重做指定片段，可选立即播放 |
+| `redo <file\|id> <seq>` | 重做指定片段并自动播放 |
 | `merge <file\|id>` | 合并全部语音片段为 `<文件名>_voice.wav` |
 | `bgm <file\|id>` | 生成与人声等长的 BGM，输出 `<文件名>_bgm.wav` |
 | `mix <file\|id>` | 混合人声与 BGM，输出最终 `<文件名>.wav` |
+| `video <file\|id> [--image PATH]` | 用最终音频和封面图生成 `<文件名>.mp4` |
 | `clean [--dry-run]` | 清理未被数据库引用的音频 |
 | `extract <file.epub> [output_dir]` | 从 EPUB 提取章节文本 |
 
@@ -278,10 +292,10 @@ data/
 ├── tts.db          # 文件、片段状态和 BGM 曲目缓存
 ├── audio/          # 按音色和文本哈希保存的 WAV
 ├── bgm/            # BGM 曲库
-└── output/         # _voice.wav、_bgm.wav 和最终 .wav
+└── output/         # _voice.wav、_bgm.wav、最终 .wav 和 .mp4
 ```
 
-`audio/` 下的文件不需要手动管理；`clean` 可以按数据库引用关系清理残留文件。`output/` 下的文件由 `merge`、`bgm`、`mix` 生成，重复执行会覆盖。
+`audio/` 下的文件不需要手动管理；`clean` 可以按数据库引用关系清理残留文件。`output/` 下的文件由 `merge`、`bgm`、`mix`、`video` 生成，重复执行会覆盖。
 
 ---
 
@@ -290,8 +304,8 @@ data/
 | 退出码 | 含义 |
 | --- | --- |
 | `0` | 成功 |
-| `1` | 参数、配置、IO、数据库、播放器错误，或 `ffmpeg`/`ffprobe` 缺失 |
-| `2` | 合成失败、重做失败、合并/BGM/混音前置条件不满足，或 `clean --dry-run` 有待删除项 |
+| `1` | 参数、配置、IO、数据库、播放器错误，或 `ffmpeg`/`ffprobe`/`audio2video` 缺失 |
+| `2` | 合成失败、重做失败、合并/BGM/混音/视频前置条件不满足，或 `clean --dry-run` 有待删除项 |
 | `130` | 用户中断 |
 
 ---
@@ -314,4 +328,6 @@ data/
 - `bgm` 只选择完整曲目；比目标时长长的曲目会被排除，剩余不足一首的时长用静音补齐
 - `mix` 需要 `ffmpeg`，BGM 音量由 `mix.bgm_volume` 控制
 - `mix` 以较长输入为时长；正常情况下 BGM 与人声等长，差异较大时会打印 warning
+- `video` 需要 `audio2video` 在 PATH 中，并先通过 `mix` 生成最终音频
+- 视频封面支持 `audio2video` 能识别的格式（PNG/JPG/JPEG/BMP/GIF）
 - `add` 和 `update` 默认只处理当前目录下的纯文件名

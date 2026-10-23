@@ -72,6 +72,7 @@ func newRootCommand() *cobra.Command {
 		newMergeCommand(&configPath),
 		newBgmCommand(&configPath),
 		newMixCommand(&configPath),
+		newVideoCommand(&configPath),
 		newCleanCommand(&configPath),
 		newFilesCommand(&configPath),
 		newFindCommand(&configPath),

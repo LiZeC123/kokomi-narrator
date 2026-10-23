@@ -22,3 +22,6 @@ bgm:
 
 mix:
   bgm_volume: 0.10
+
+video:
+  image: ~/Pictures/KokomiReader.jpg

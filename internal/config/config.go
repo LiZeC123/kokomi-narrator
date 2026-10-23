@@ -43,6 +43,7 @@ type Config struct {
 	Merge Merge `yaml:"merge"`
 	BGM   BGM   `yaml:"bgm"`
 	Mix   Mix   `yaml:"mix"`
+	Video Video `yaml:"video"`
 }
 
 type TTS struct {
@@ -69,6 +70,10 @@ type Mix struct {
 	BGMVolume float64 `yaml:"bgm_volume"`
 }
 
+type Video struct {
+	Image string `yaml:"image"`
+}
+
 func Default() *Config {
 	return &Config{
 		Database:  "./data/tts.db",
@@ -93,6 +98,9 @@ func Default() *Config {
 		},
 		Mix: Mix{
 			BGMVolume: 0.10,
+		},
+		Video: Video{
+			Image: "./data/image.jpg",
 		},
 	}
 }
@@ -154,6 +162,9 @@ func (c *Config) validate() error {
 	}
 	if c.Mix.BGMVolume < 0 || c.Mix.BGMVolume > 1 {
 		return fmt.Errorf("mix.bgm_volume must be between 0 and 1")
+	}
+	if strings.TrimSpace(c.Video.Image) == "" {
+		return fmt.Errorf("video.image must not be empty")
 	}
 
 	switch strings.ToLower(strings.TrimSpace(c.LogLevel)) {

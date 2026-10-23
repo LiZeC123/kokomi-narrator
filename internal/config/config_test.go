@@ -125,6 +125,52 @@ tts:
 	}
 }
 
+func TestVideoDefaultsAndOverride(t *testing.T) {
+	if got := Default().Video.Image; got != "./data/image.jpg" {
+		t.Fatalf("Default().Video.Image = %q, want ./data/image.jpg", got)
+	}
+
+	base := `database: ./data/tts.db
+audio_dir: ./data/audio
+output_dir: ./data/output
+tts:
+  url: http://127.0.0.1:8080/tts
+  character: default
+`
+	cfg, err := Load(writeConfig(t, base))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Video.Image != "./data/image.jpg" {
+		t.Fatalf("default video.image = %q", cfg.Video.Image)
+	}
+
+	cfg, err = Load(writeConfig(t, base+`video:
+  image: ~/Pictures/cover.png
+`))
+	if err != nil {
+		t.Fatalf("Load() with video.image error = %v", err)
+	}
+	if cfg.Video.Image != "~/Pictures/cover.png" {
+		t.Fatalf("video.image = %q, want ~/Pictures/cover.png", cfg.Video.Image)
+	}
+}
+
+func TestVideoValidation(t *testing.T) {
+	path := writeConfig(t, `database: ./data/tts.db
+audio_dir: ./data/audio
+output_dir: ./data/output
+tts:
+  url: http://127.0.0.1:8080/tts
+  character: default
+video:
+  image: ""
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() accepted an empty video.image")
+	}
+}
+
 func TestConcurrencyMustBePositive(t *testing.T) {
 	path := writeConfig(t, `database: ./data/tts.db
 audio_dir: ./data/audio

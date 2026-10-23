@@ -16,22 +16,19 @@ import (
 )
 
 func newRedoCommand(configPath *string) *cobra.Command {
-	var play bool
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "redo <file|id> <seq>",
-		Short: "Regenerate the audio for one speech segment",
+		Short: "Regenerate and play the audio for one speech segment",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withApp(cmd, *configPath, func(a *app) error {
-				return runRedo(a, args[0], args[1], play)
+				return runRedo(a, args[0], args[1])
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&play, "play", false, "play the audio after redo")
-	return cmd
 }
 
-func runRedo(a *app, fileArg, seqArg string, play bool) error {
+func runRedo(a *app, fileArg, seqArg string) error {
 	file, err := resolveFile(a, fileArg)
 	if err != nil {
 		return err
@@ -70,9 +67,7 @@ func runRedo(a *app, fileArg, seqArg string, play bool) error {
 		}
 		segment.Status = store.StatusSuccess
 		a.printf("redo %s seq %d: success (%d segment(s))\n", file.Filename, seq, n)
-		if play {
-			playAfterRedo(a, file, segment)
-		}
+		playAfterRedo(a, file, segment)
 		return nil
 	}
 
@@ -84,9 +79,7 @@ func runRedo(a *app, fileArg, seqArg string, play bool) error {
 		}
 		segment.Status = store.StatusSuccess
 		a.errorf("redo %s seq %d failed: %s (existing audio kept)\n", file.Filename, seq, displayMsg)
-		if play {
-			playAfterRedo(a, file, segment)
-		}
+		playAfterRedo(a, file, segment)
 		return exitSilent(2)
 	}
 

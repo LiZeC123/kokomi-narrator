@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/LiZeC123/kokomi-narrator/internal/pathutil"
 )
 
 var audioExtensions = map[string]struct{}{
@@ -29,7 +31,11 @@ type ScannedFile struct {
 // ScanDir lists supported audio files at the top level of dir. It returns the
 // absolute library directory so cache entries use stable paths.
 func ScanDir(dir string) (string, []ScannedFile, error) {
-	absDir, err := filepath.Abs(dir)
+	expanded, err := pathutil.ExpandHome(dir)
+	if err != nil {
+		return "", nil, err
+	}
+	absDir, err := filepath.Abs(expanded)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve BGM directory %s: %w", dir, err)
 	}

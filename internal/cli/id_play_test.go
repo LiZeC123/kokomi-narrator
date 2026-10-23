@@ -214,9 +214,9 @@ func TestRedoPlay(t *testing.T) {
 		t.Fatalf("add exit = %d, stderr = %s", code, stderr)
 	}
 
-	code, stdout, stderr = runCLI(t, "redo", "1", "1", "--play")
+	code, stdout, stderr = runCLI(t, "redo", "1", "1")
 	if code != 0 {
-		t.Fatalf("redo --play exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		t.Fatalf("redo exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 	if !strings.Contains(stdout, "redo a.txt seq 1: success") {
 		t.Fatalf("redo output = %q", stdout)
@@ -228,24 +228,24 @@ func TestRedoPlay(t *testing.T) {
 
 	// A playback error must not change redo's successful exit code.
 	player.err = errors.New("no audio device")
-	code, _, stderr = runCLI(t, "redo", "1", "1", "--play")
+	code, _, stderr = runCLI(t, "redo", "1", "1")
 	if code != 0 {
-		t.Fatalf("redo --play with playback error exit = %d, want 0", code)
+		t.Fatalf("redo with playback error exit = %d, want 0", code)
 	}
 	if !strings.Contains(stderr, "playback failed") {
-		t.Fatalf("redo --play stderr = %q, want playback warning", stderr)
+		t.Fatalf("redo stderr = %q, want playback warning", stderr)
 	}
 
 	// A redo failure with valid existing audio keeps that audio and plays it.
 	fail.Store(true)
 	player.err = nil
 	player.paths = nil
-	code, _, stderr = runCLI(t, "redo", "1", "1", "--play")
+	code, _, stderr = runCLI(t, "redo", "1", "1")
 	if code != 2 {
-		t.Fatalf("failed redo --play exit = %d, want 2", code)
+		t.Fatalf("failed redo exit = %d, want 2", code)
 	}
 	if !strings.Contains(stderr, "existing audio kept") {
-		t.Fatalf("failed redo --play stderr = %q", stderr)
+		t.Fatalf("failed redo stderr = %q", stderr)
 	}
 	if len(player.paths) != 1 || player.paths[0] != expected {
 		t.Fatalf("failed redo played paths = %v, want [%s]", player.paths, expected)

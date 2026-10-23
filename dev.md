@@ -8,6 +8,7 @@
 - 日志：标准库 `log/slog`
 - WAV 处理：标准库自行解析 RIFF/WAVE
 - BGM/混音：外部 `ffmpeg` / `ffprobe`（音频库解码、拼接、混音）
+- 视频合成：外部 `audio2video`（音频 + 封面图 → MP4）
 
 
 ---
@@ -36,10 +37,13 @@ merge:
   leading_trailing_gap: false
 
 bgm:
-  dir: ./data/bgm
+  dir: ./data/bgm        # 支持 ~/... 和绝对路径
 
 mix:
   bgm_volume: 0.10
+
+video:
+  image: ./data/image.jpg
 ```
 
 说明：
@@ -60,8 +64,9 @@ data/audio/9f8e7d6c5b4a3210/a1/a1b2c3...（64位）.wav
 
 - 临时文件与目标文件同目录，命名为 `<text_hash>.wav.tmp`。
 - 修改 `character` 后，`make` 会检测 `files.voice_key` 不一致，自动切换音色并重置该文件的语音片段状态。
-- `bgm.dir` 是 BGM 曲库目录，`bgm` 只读该配置，不提供 `--dir`。
+- `bgm.dir` 是 BGM 曲库目录，支持 `~`、`~/...`、绝对路径和项目外目录；`bgm` 只读该配置，不提供 `--dir`。
 - `mix.bgm_volume` 是混音时 BGM 的线性音量，范围 `0.0 ~ 1.0`，默认 `0.10`。
+- `video.image` 是视频封面图，支持 `~`、`~/...` 和绝对路径；可通过 `video --image` 覆盖。
 
 ---
 
@@ -227,6 +232,7 @@ ttsctl redo a.txt 12
 ttsctl merge a.txt
 ttsctl bgm a.txt
 ttsctl mix a.txt
+ttsctl video a.txt
 ttsctl clean --dry-run
 ttsctl clean
 ```
@@ -237,15 +243,15 @@ ttsctl clean
 - 扩展名必须为 `.txt`，大小写不敏感。
 - 文件名作为唯一 key，大小写敏感。
 - `add` 已存在报错；`update` 不存在报错。
-- `make`、`ls`、`redo`、`merge`、`bgm`、`mix` 一次只处理一个文件。
+- `make`、`ls`、`redo`、`merge`、`bgm`、`mix`、`video` 一次只处理一个文件。
 - `clean` 为全局操作。
-- `bgm` 和 `mix` 支持文件 ID 或原文件名。
+- `bgm`、`mix`、`video` 支持文件 ID 或原文件名。
 
 退出码：
 
 - `0`：成功
-- `1`：参数、配置、IO、数据库错误，或 `ffmpeg`/`ffprobe` 缺失
-- `2`：转换失败、重做失败、合并/BGM/混音前置条件不满足，或 `clean --dry-run` 有待删除项
+- `1`：参数、配置、IO、数据库错误，或 `ffmpeg`/`ffprobe`/`audio2video` 缺失
+- `2`：转换失败、重做失败、合并/BGM/混音/视频前置条件不满足，或 `clean --dry-run` 有待删除项
 - `130`：用户中断
 
 ---
@@ -438,11 +444,13 @@ ttsctl redo a.txt 12
 4. 调用 TTS，成功则写 `.tmp`、校验、原子替换目标 wav。
 5. 成功：
    - 更新当前文件同 `text_hash` 的所有 `speech` 片段为 `success`；
-   - 清空 `error`。
+   - 清空 `error`；
+   - 调用系统播放器自动播放该片段。播放失败只打印 warning，不改变退出码。
 6. 失败：
-   - 若目标 wav 仍存在且合法，保持/设为 `success`，打印错误，退出码 2；
-   - 若目标 wav 不存在或非法，将同哈希片段设为 `failed` 并记录错误。
+   - 若目标 wav 仍存在且合法，保持/设为 `success`，打印错误，播放已有音频，退出码 2；
+   - 若目标 wav 不存在或非法，将同哈希片段设为 `failed` 并记录错误，不播放。
 7. `redo` 不删除旧音频，只有新音频校验成功后才替换。
+8. `redo` 没有 `--play` 参数；播放是默认行为。
 
 ---
 
@@ -582,6 +590,7 @@ output_dir/<base>_voice.wav
 ## 16.1 曲库扫描与缓存
 
 - `bgm.dir` 来自配置，不提供命令行参数。
+- 支持 `~`、`~/...` 和绝对路径，曲库可以位于项目目录之外。
 - 非递归扫描，支持 `.mp3`、`.wav`、`.flac`、`.m4a`、`.aac`、`.ogg`、`.opus`，大小写不敏感。
 - 曲目时长写入 `bgm_tracks`，按 `size + mtime_ns` 判断是否需要重新 `ffprobe`。
 - 只探测新增或变化的曲目；已消失的曲目从缓存中清理。
@@ -656,3 +665,43 @@ output_dir/<base>.wav
 - 先写 `<base>.wav.tmp`，用 `wavutil` 校验后原子 `rename`。
 - 重复执行会覆盖已有最终文件。
 - 中断时清理 `.tmp`，退出码 130。
+
+
+---
+
+# 18. `video` 指令
+
+```bash
+ttsctl video <file|id> [--image PATH]
+```
+
+输入：
+
+- 最终音频：`output_dir/<base>.wav`（由 `mix` 生成）
+- 封面图：优先使用 `--image`，否则使用 `video.image`
+
+输出：
+
+```text
+output_dir/<base>.mp4
+```
+
+流程：
+
+1. 校验最终音频存在且是合法 PCM WAV：
+   - 缺失：退出码 2，提示先执行 `mix`；
+   - 非法：退出码 2。
+2. 解析封面图路径：
+   - 支持 `~`、`~/...` 和绝对路径；
+   - 必须是存在的普通文件，否则退出码 2；
+   - 支持 `audio2video` 能识别的图片格式（PNG/JPG/JPEG/BMP/GIF）。
+3. 从 PATH 查找 `audio2video`，缺失时退出码 1。
+4. 调用：
+
+```bash
+audio2video -a <最终音频> -i <封面图> -o <output_dir>/<base>.tmp.mp4
+```
+
+5. 校验临时文件存在且非空，然后原子 `rename` 为 `output_dir/<base>.mp4`。
+6. 重复执行会覆盖已有视频。
+7. 中断时删除 `.tmp` 文件，退出码 130。

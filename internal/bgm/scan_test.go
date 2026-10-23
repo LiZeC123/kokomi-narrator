@@ -48,3 +48,45 @@ func TestScanDirRejectsMissingDirectory(t *testing.T) {
 		t.Fatal("ScanDir() accepted a missing directory")
 	}
 }
+
+func TestScanDirExpandsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	library := filepath.Join(home, "Music", "bgm")
+	if err := os.MkdirAll(library, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(library, "track.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	absDir, files, err := ScanDir("~/Music/bgm")
+	if err != nil {
+		t.Fatalf("ScanDir(~/Music/bgm) error = %v", err)
+	}
+	if absDir != library {
+		t.Fatalf("absDir = %q, want %q", absDir, library)
+	}
+	if len(files) != 1 || files[0].Filename != "track.mp3" {
+		t.Fatalf("files = %+v, want track.mp3", files)
+	}
+
+	// Absolute paths outside the project directory must keep working.
+	absDir, _, err = ScanDir(library)
+	if err != nil {
+		t.Fatalf("ScanDir(absolute) error = %v", err)
+	}
+	if absDir != library {
+		t.Fatalf("absolute absDir = %q, want %q", absDir, library)
+	}
+
+	absDir, _, err = ScanDir("~")
+	if err != nil {
+		t.Fatalf("ScanDir(~) error = %v", err)
+	}
+	if absDir != home {
+		t.Fatalf("home absDir = %q, want %q", absDir, home)
+	}
+}
