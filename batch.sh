@@ -3,6 +3,7 @@
 #
 # Flow per file:
 #   add (or update if already registered) -> make -> merge
+#   with --with-bgm: -> bgm -> mix
 #
 # A failed file is skipped and the next file continues. The exit code is 1
 # if at least one file failed, otherwise 0.
@@ -14,14 +15,18 @@ PROJECT_ROOT="$SCRIPT_DIR"
 
 usage() {
 	cat <<'EOF'
-Usage: batch.sh [-c config.yaml] [directory]
+Usage: batch.sh [-c config.yaml] [--with-bgm] [directory]
 
 Convert every .txt file in directory (default: current directory) with:
   add (or update if already registered) -> make -> merge
 
+With --with-bgm, continue with:
+  bgm (BGM matched to the voice duration) -> mix (voice + BGM)
+
 Options:
   -c, --config PATH  config file. Default: <directory>/config.yaml, then
                      the project's config.yaml
+  --with-bgm         also generate BGM and the final mixed WAV
   -h, --help         show this help
 
 Environment:
@@ -39,12 +44,17 @@ die() {
 }
 
 config_arg=""
+with_bgm=0
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		-c | --config)
 			[[ $# -ge 2 ]] || die "$1 requires a value"
 			config_arg="$2"
 			shift 2
+			;;
+		--with-bgm)
+			with_bgm=1
+			shift
 			;;
 		-h | --help)
 			usage
@@ -180,6 +190,28 @@ for path in "${files[@]}"; do
 		failed=$((failed + 1))
 		echo
 		continue
+	fi
+
+	if [[ $with_bgm -eq 1 ]]; then
+		"$ttsctl_bin" --config "$config" bgm -- "$base"
+		bgm_rc=$?
+		if [[ $bgm_rc -ne 0 ]]; then
+			[[ $bgm_rc -eq 130 ]] && { echo "interrupted" >&2; exit 130; }
+			echo "SKIP $base: bgm failed" >&2
+			failed=$((failed + 1))
+			echo
+			continue
+		fi
+
+		"$ttsctl_bin" --config "$config" mix -- "$base"
+		mix_rc=$?
+		if [[ $mix_rc -ne 0 ]]; then
+			[[ $mix_rc -eq 130 ]] && { echo "interrupted" >&2; exit 130; }
+			echo "SKIP $base: mix failed" >&2
+			failed=$((failed + 1))
+			echo
+			continue
+		fi
 	fi
 
 	ok=$((ok + 1))

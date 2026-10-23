@@ -70,6 +70,8 @@ func newRootCommand() *cobra.Command {
 		newLsCommand(&configPath),
 		newRedoCommand(&configPath),
 		newMergeCommand(&configPath),
+		newBgmCommand(&configPath),
+		newMixCommand(&configPath),
 		newCleanCommand(&configPath),
 		newFilesCommand(&configPath),
 		newFindCommand(&configPath),

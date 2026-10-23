@@ -7,6 +7,7 @@
 - 进度条：`github.com/schollz/progressbar/v3`
 - 日志：标准库 `log/slog`
 - WAV 处理：标准库自行解析 RIFF/WAVE
+- BGM/混音：外部 `ffmpeg` / `ffprobe`（音频库解码、拼接、混音）
 
 
 ---
@@ -33,6 +34,12 @@ merge:
   overwrite: true
   gap_between_segments: 200ms
   leading_trailing_gap: false
+
+bgm:
+  dir: ./data/bgm
+
+mix:
+  bgm_volume: 0.10
 ```
 
 说明：
@@ -53,6 +60,8 @@ data/audio/9f8e7d6c5b4a3210/a1/a1b2c3...（64位）.wav
 
 - 临时文件与目标文件同目录，命名为 `<text_hash>.wav.tmp`。
 - 修改 `character` 后，`make` 会检测 `files.voice_key` 不一致，自动切换音色并重置该文件的语音片段状态。
+- `bgm.dir` 是 BGM 曲库目录，`bgm` 只读该配置，不提供 `--dir`。
+- `mix.bgm_volume` 是混音时 BGM 的线性音量，范围 `0.0 ~ 1.0`，默认 `0.10`。
 
 ---
 
@@ -92,7 +101,7 @@ Header：`Content-Type: application/json`
 
 # 4. 数据库设计
 
-单表 `files` + `segments`，不建 `audio_cache`，不存音频路径。
+`files` + `segments` 保存文本与合成状态；`bgm_tracks` 保存 BGM 曲库的时长缓存。不建 `audio_cache`，不存合成音频路径。
 
 ```sql
 CREATE TABLE schema_version (
@@ -126,7 +135,31 @@ CREATE TABLE segments (
 
 CREATE INDEX idx_segments_file_status ON segments(file_id, status);
 CREATE INDEX idx_segments_hash ON segments(text_hash);
+
+CREATE TABLE bgm_tracks (
+    id          INTEGER PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    dir         TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    size        INTEGER NOT NULL,
+    mtime_ns    INTEGER NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE INDEX idx_bgm_tracks_dir ON bgm_tracks(dir);
 ```
+
+当前 `schema_version = 2`。从版本 1 升级时只新增 `bgm_tracks` 表并更新版本号，不修改原有数据。
+
+`bgm_tracks` 的缓存规则：
+
+- `path` 使用绝对路径，`dir` 是当前曲库的绝对路径。
+- 扫描时先比较 `size` 和 `mtime_ns`；一致则直接复用 `duration_ms`，不调用 `ffprobe`。
+- 新增或变化的曲目重新探测，成功后 upsert。
+- 已消失的曲目按 `dir` 清理。
+- 探测失败不写缓存，下次运行继续重试。
+- 旧曲库目录留下的缓存不会自动删除，切回该目录时可以继续复用。
 
 连接配置：
 
@@ -192,6 +225,8 @@ ttsctl ls a.txt
 ttsctl ls a.txt 100 20
 ttsctl redo a.txt 12
 ttsctl merge a.txt
+ttsctl bgm a.txt
+ttsctl mix a.txt
 ttsctl clean --dry-run
 ttsctl clean
 ```
@@ -202,14 +237,15 @@ ttsctl clean
 - 扩展名必须为 `.txt`，大小写不敏感。
 - 文件名作为唯一 key，大小写敏感。
 - `add` 已存在报错；`update` 不存在报错。
-- `make`、`ls`、`redo`、`merge` 一次只处理一个文件。
+- `make`、`ls`、`redo`、`merge`、`bgm`、`mix` 一次只处理一个文件。
 - `clean` 为全局操作。
+- `bgm` 和 `mix` 支持文件 ID 或原文件名。
 
 退出码：
 
 - `0`：成功
-- `1`：参数、配置、IO、数据库错误
-- `2`：转换失败、重做失败、合并前置条件不满足，或 `clean --dry-run` 有待删除项
+- `1`：参数、配置、IO、数据库错误，或 `ffmpeg`/`ffprobe` 缺失
+- `2`：转换失败、重做失败、合并/BGM/混音前置条件不满足，或 `clean --dry-run` 有待删除项
 - `130`：用户中断
 
 ---
@@ -435,7 +471,7 @@ ttsctl merge a.txt
 3. 校验所有片段采样率、声道数、位深、`blockAlign`、`byteRate` 一致。
 4. 拼接所有 `data`，并在有效片段之间插入静音。
 5. 用第一个片段的 `fmt` chunk 原始数据重写 RIFF/WAVE 头。
-6. 输出到 `output_dir/<原文件名去扩展名>.wav`。
+6. 输出到 `output_dir/<原文件名去扩展名>_voice.wav`。
 7. 先写 `.tmp`，再原子 `rename`。
 8. `merge.overwrite = false` 且输出存在时报错。
 
@@ -526,3 +562,97 @@ audio_dir/<voice_key>/<hash前2位>/*.wav
 - 进度条输出 stderr，避免污染 `ls` 等 stdout 输出。
 - 进度条显示：总数、已完成、失败数、当前哈希前 8 位。
 - 非 TTY 环境退化为逐片段日志。
+
+---
+
+# 16. `bgm` 指令
+
+```bash
+ttsctl bgm <file|id>
+```
+
+目标时长来自 `merge` 生成的人声文件：
+
+```text
+output_dir/<base>_voice.wav
+```
+
+使用 header-only 方式读取 `fmt` / `data` 头并计算时长，不把整段音频读入内存。文件缺失或非法时退出码 2，并提示先执行 `merge`。
+
+## 16.1 曲库扫描与缓存
+
+- `bgm.dir` 来自配置，不提供命令行参数。
+- 非递归扫描，支持 `.mp3`、`.wav`、`.flac`、`.m4a`、`.aac`、`.ogg`、`.opus`，大小写不敏感。
+- 曲目时长写入 `bgm_tracks`，按 `size + mtime_ns` 判断是否需要重新 `ffprobe`。
+- 只探测新增或变化的曲目；已消失的曲目从缓存中清理。
+- 探测失败的曲目本次跳过并打印 warning，下次运行继续重试。
+
+## 16.2 选曲规则
+
+- 只选择完整曲目。
+- 时长大于目标时长的曲目直接排除，不切割、不淡入淡出。
+- 如果没有任何可用曲目，退出码 2。
+- 曲库不够时循环使用：
+  - 每轮打乱曲目顺序；
+  - 放得下的曲目依次选中；
+  - 放不下的曲目跳过，继续找更短的；
+  - 一轮结束仍有剩余时重新打乱再来一轮；
+  - 剩余时长比最短曲目还短时停止选曲。
+- 剩余时长按 `bgm_tmp.go` 的逻辑随机分配到首部、曲目之间、尾部，最多 3 个位置。
+- 只有大于 10ms 的 gap 才生成静音。
+
+## 16.3 渲染
+
+- 固定输出格式：48kHz、双声道、`pcm_s16le`。
+- 每个曲目用 ffmpeg 转码为统一格式的临时 WAV。
+- 静音用 ffmpeg `anullsrc` 生成。
+- 通过 concat demuxer 拼接。
+- 输出到 `output_dir/<base>_bgm.wav`：
+  - 先写 `<base>_bgm.wav.tmp`；
+  - 用 `wavutil` 校验；
+  - 原子 `rename`。
+- 重复执行会覆盖已有 BGM。
+- 中断时清理临时文件和 `.tmp`，退出码 130。
+
+## 16.4 输出摘要
+
+```text
+bgm a.txt: library=./data/bgm files=128 cached=124 probed=4 removed=0 invalid=0 target=1h2m3s
+bgm a.txt: wrote data/output/a_bgm.wav (42 tracks, 0s silence, 1h2m3.021s)
+```
+
+---
+
+# 17. `mix` 指令
+
+```bash
+ttsctl mix <file|id>
+```
+
+输入：
+
+```text
+output_dir/<base>_voice.wav
+output_dir/<base>_bgm.wav
+```
+
+输出：
+
+```text
+output_dir/<base>.wav
+```
+
+规则：
+
+- 两个输入必须存在且是合法 PCM WAV，否则退出码 2，并提示先执行 `merge` / `bgm`。
+- BGM 音量来自 `mix.bgm_volume`，范围 `0.0 ~ 1.0`，默认 `0.10`。
+- 混音以最长输入为时长，避免两者长度接近时截断：
+  - `amix=duration=longest`；
+  - `normalize=0`，避免人声被默认衰减；
+  - `alimiter` 防止削波。
+- BGM 重采样到人声的采样率/声道布局。
+- 输出格式跟随人声：采样率、声道数、位深不变。
+- 只支持单声道或双声道人声。
+- 先写 `<base>.wav.tmp`，用 `wavutil` 校验后原子 `rename`。
+- 重复执行会覆盖已有最终文件。
+- 中断时清理 `.tmp`，退出码 130。

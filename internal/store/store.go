@@ -12,7 +12,7 @@ import (
 	"github.com/LiZeC123/kokomi-narrator/internal/textparse"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const (
 	StatusPending    = "pending"
@@ -65,6 +65,18 @@ type UpdateStats struct {
 type Ref struct {
 	VoiceKey string
 	TextHash string
+}
+
+// BgmTrack is a cached music library entry. DurationMS is refreshed only when
+// the file's size or modification time changes.
+type BgmTrack struct {
+	Path       string
+	Dir        string
+	Filename   string
+	DurationMS int64
+	Size       int64
+	MtimeNS    int64
+	UpdatedAt  string
 }
 
 type Store struct {
@@ -138,6 +150,17 @@ func initSchema(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_segments_file_status ON segments(file_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_segments_hash ON segments(text_hash)`,
+		`CREATE TABLE IF NOT EXISTS bgm_tracks (
+			id          INTEGER PRIMARY KEY,
+			path        TEXT NOT NULL UNIQUE,
+			dir         TEXT NOT NULL,
+			filename    TEXT NOT NULL,
+			duration_ms INTEGER NOT NULL,
+			size        INTEGER NOT NULL,
+			mtime_ns    INTEGER NOT NULL,
+			updated_at  TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bgm_tracks_dir ON bgm_tracks(dir)`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {
@@ -154,7 +177,14 @@ func initSchema(db *sql.DB) error {
 		}
 	case err != nil:
 		return fmt.Errorf("read schema version: %w", err)
-	case version != schemaVersion:
+	case version == schemaVersion:
+		// Current version; the additive table above is already present.
+	case version == 1:
+		// v1 -> v2 only adds the BGM library cache table, which was created above.
+		if _, err := db.Exec(`UPDATE schema_version SET version = ?`, schemaVersion); err != nil {
+			return fmt.Errorf("migrate schema version: %w", err)
+		}
+	default:
 		return fmt.Errorf("unsupported database schema version %d", version)
 	}
 	return nil
@@ -538,6 +568,115 @@ func (s *Store) References() (map[Ref]struct{}, error) {
 		refs[ref] = struct{}{}
 	}
 	return refs, rows.Err()
+}
+
+// BgmTracksByDir returns cached music library entries for one directory.
+func (s *Store) BgmTracksByDir(dir string) ([]BgmTrack, error) {
+	rows, err := s.db.Query(
+		`SELECT path, dir, filename, duration_ms, size, mtime_ns, updated_at
+		 FROM bgm_tracks WHERE dir = ? ORDER BY path`, dir)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tracks []BgmTrack
+	for rows.Next() {
+		var track BgmTrack
+		if err := rows.Scan(&track.Path, &track.Dir, &track.Filename,
+			&track.DurationMS, &track.Size, &track.MtimeNS, &track.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tracks = append(tracks, track)
+	}
+	return tracks, rows.Err()
+}
+
+// UpsertBgmTracks inserts or refreshes cached music library entries.
+func (s *Store) UpsertBgmTracks(tracks []BgmTrack) error {
+	if len(tracks) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO bgm_tracks(path, dir, filename, duration_ms, size, mtime_ns, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(path) DO UPDATE SET
+		     dir = excluded.dir,
+		     filename = excluded.filename,
+		     duration_ms = excluded.duration_ms,
+		     size = excluded.size,
+		     mtime_ns = excluded.mtime_ns,
+		     updated_at = excluded.updated_at`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, track := range tracks {
+		if _, err := stmt.Exec(track.Path, track.Dir, track.Filename,
+			track.DurationMS, track.Size, track.MtimeNS, track.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// PruneBgmTracks removes cached entries under dir that no longer exist.
+func (s *Store) PruneBgmTracks(dir string, keepPaths []string) (int, error) {
+	rows, err := s.db.Query(`SELECT path FROM bgm_tracks WHERE dir = ?`, dir)
+	if err != nil {
+		return 0, err
+	}
+	keep := make(map[string]struct{}, len(keepPaths))
+	for _, path := range keepPaths {
+		keep[path] = struct{}{}
+	}
+	var stale []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if _, ok := keep[path]; !ok {
+			stale = append(stale, path)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	if len(stale) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`DELETE FROM bgm_tracks WHERE dir = ? AND path = ?`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	for _, path := range stale {
+		if _, err := stmt.Exec(dir, path); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(stale), nil
 }
 
 func nullableString(s *string) any {

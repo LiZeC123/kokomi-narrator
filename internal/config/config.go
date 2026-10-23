@@ -41,6 +41,8 @@ type Config struct {
 
 	TTS   TTS   `yaml:"tts"`
 	Merge Merge `yaml:"merge"`
+	BGM   BGM   `yaml:"bgm"`
+	Mix   Mix   `yaml:"mix"`
 }
 
 type TTS struct {
@@ -57,6 +59,14 @@ type Merge struct {
 	Overwrite          bool     `yaml:"overwrite"`
 	GapBetweenSegments Duration `yaml:"gap_between_segments"`
 	LeadingTrailingGap bool     `yaml:"leading_trailing_gap"`
+}
+
+type BGM struct {
+	Dir string `yaml:"dir"`
+}
+
+type Mix struct {
+	BGMVolume float64 `yaml:"bgm_volume"`
 }
 
 func Default() *Config {
@@ -77,6 +87,12 @@ func Default() *Config {
 		Merge: Merge{
 			Overwrite:          true,
 			GapBetweenSegments: Duration(200 * time.Millisecond),
+		},
+		BGM: BGM{
+			Dir: "./data/bgm",
+		},
+		Mix: Mix{
+			BGMVolume: 0.10,
 		},
 	}
 }
@@ -132,6 +148,12 @@ func (c *Config) validate() error {
 	}
 	if c.Merge.GapBetweenSegments.Std() < 0 {
 		return fmt.Errorf("merge.gap_between_segments must not be negative")
+	}
+	if strings.TrimSpace(c.BGM.Dir) == "" {
+		return fmt.Errorf("bgm.dir must not be empty")
+	}
+	if c.Mix.BGMVolume < 0 || c.Mix.BGMVolume > 1 {
+		return fmt.Errorf("mix.bgm_volume must be between 0 and 1")
 	}
 
 	switch strings.ToLower(strings.TrimSpace(c.LogLevel)) {

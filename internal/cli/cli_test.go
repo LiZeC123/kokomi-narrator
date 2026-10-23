@@ -153,7 +153,7 @@ merge:
 
 	code, stdout, stderr = runCLI(t, "merge", "a.txt")
 	assertCode(code, 0, stdout, stderr)
-	merged, err := wavutil.ReadFile(filepath.Join("data", "output", "a.wav"))
+	merged, err := wavutil.ReadFile(filepath.Join("data", "output", "a_voice.wav"))
 	if err != nil {
 		t.Fatalf("merged file: %v", err)
 	}

@@ -18,7 +18,7 @@ import (
 func newMergeCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "merge <file|id>",
-		Short: "Merge all speech audio of a text file into one WAV",
+		Short: "Merge all speech audio of a text file into a voice WAV",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withApp(cmd, *configPath, func(a *app) error {
@@ -36,7 +36,7 @@ func runMerge(a *app, fileArg string) error {
 	name := file.Filename
 
 	base := strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename))
-	outputPath := filepath.Join(a.cfg.OutputDir, base+".wav")
+	outputPath := filepath.Join(a.cfg.OutputDir, base+"_voice.wav")
 	if !a.cfg.Merge.Overwrite {
 		if _, err := os.Stat(outputPath); err == nil {
 			return exitWithError(2, fmt.Errorf("merge %s: output %s already exists and merge.overwrite is false", name, outputPath))
