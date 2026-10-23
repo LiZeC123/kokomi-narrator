@@ -307,3 +307,10 @@ go test -race ./internal/cli ./internal/bgm ./internal/store
 - 配置、文本解析、SQLite、WAV、BGM 选曲、静音检测和 CLI 工作流都有单元/集成测试。
 - 依赖 ffmpeg、ffprobe 或 audio2video 的测试在工具缺失时跳过。
 - `testdata/good.wav` 和 `testdata/bad.wav` 用于静音检测和 CLI 集成测试。
+
+
+
+## 参考资料
+
+- [GPT-soVITS-Inference](https://www.yuque.com/xter/zibxlp/knu8p82lb5ipufqy)
+- [audio2video](https://github.com/KaoruBB/audio2video/blob/main/README.md)
