@@ -32,8 +32,9 @@ func New(cfg config.TTS) *Client {
 }
 
 type requestBody struct {
-	Character string `json:"character"`
-	Text      string `json:"text"`
+	Character    string `json:"character"`
+	Text         string `json:"text"`
+	TextLanguage string `json:"text_language"`
 }
 
 // Synthesize requests one segment of speech and returns a validated PCM WAV.
@@ -41,6 +42,7 @@ func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	payload, err := json.Marshal(requestBody{
 		Character: c.cfg.Character,
 		Text:      encodeText(text),
+		TextLanguage: "all_zh",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
